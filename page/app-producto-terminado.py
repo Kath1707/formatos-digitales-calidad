@@ -43,11 +43,7 @@ except ImportError:
 # ----------------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
 # ----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="Registro de Calidad - Producto Terminado B2B Starbucks",
-    page_icon="✅",
-    layout="wide",
-)
+
 
 EXCEL_PATH = "MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx"
 SHEET_NAME = "ALMENARA-PT_2026"
