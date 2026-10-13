@@ -175,7 +175,6 @@ def guardar_registro(
 # ──────────────────────────────────────────────────────────────────────────
 # INTERFAZ STREAMLIT
 # ──────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Control Desinfección Naranja", page_icon="🍊", layout="centered")
 
 st.title("🍊 Control de Desinfección de Naranja")
 st.caption("MA-FR-033 · Control de procesos · María Almenara")
