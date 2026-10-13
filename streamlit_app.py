@@ -121,7 +121,7 @@ with col1:
     )
 with col2:
     if st.button("Abrir →", key="btn_pt"):
-        st.switch_page("pages/app-producto-terminado.py")
+        st.switch_page("page/app-producto-terminado.py")
 
 # Módulo 2 — Proceso Interno / B2B
 col1, col2 = st.columns([3, 1], vertical_alignment="center")
@@ -138,7 +138,7 @@ with col1:
     )
 with col2:
     if st.button("Abrir →", key="btn_pi"):
-        st.switch_page("pages/app-procesos-b2b.py")
+        st.switch_page("page/app-procesos-b2b.py")
 
 # Módulo 3 — Cocina Dulce
 col1, col2 = st.columns([3, 1], vertical_alignment="center")
@@ -155,7 +155,7 @@ with col1:
     )
 with col2:
     if st.button("Abrir →", key="btn_cocina"):
-        st.switch_page("pages/app-cocina-dulce.py")
+        st.switch_page("page/app-cocina-dulce.py")
 
 # ── Módulos de desinfección ─────────────────────────────────────────────────
 st.markdown('<p class="seccion-label">Control de desinfección</p>', unsafe_allow_html=True)
@@ -175,7 +175,7 @@ with col1:
     )
 with col2:
     if st.button("Abrir →", key="btn_huevo"):
-        st.switch_page("pages/app-desinfeccion-huevo.py")
+        st.switch_page("page/app-desinfeccion-huevo.py")
 
 # Módulo 5 — Desinfección Naranja
 col1, col2 = st.columns([3, 1], vertical_alignment="center")
@@ -192,7 +192,7 @@ with col1:
     )
 with col2:
     if st.button("Abrir →", key="btn_naranja"):
-        st.switch_page("pages/app-desinfeccion-naranja.py")
+        st.switch_page("page/app-desinfeccion-naranja.py")
 
 # ── Pie ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
