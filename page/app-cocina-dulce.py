@@ -35,11 +35,6 @@ except ImportError:
 # ----------------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
 # ----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="Registro de Calidad - Insumos Cocina Dulce B2B Starbucks",
-    page_icon="🍯",
-    layout="wide",
-)
 
 EXCEL_PATH = "MA-PL-019_PLAN_CALIDAD_COCINA.xlsx"
 SHEET_NAME = "COCINA"
