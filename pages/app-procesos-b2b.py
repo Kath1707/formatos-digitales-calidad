@@ -1283,6 +1283,7 @@ elif st.session_state.step == 10:
             ],
         }
     )
+    resumen_info["Valor"] = resumen_info["Valor"].astype(str)
     st.dataframe(resumen_info, use_container_width=True, hide_index=True)
 
     if parametros:
