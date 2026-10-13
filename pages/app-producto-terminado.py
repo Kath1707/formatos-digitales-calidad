@@ -6,7 +6,7 @@ Streamlit + Google Sheets (histórico) + GitHub deploy.
 Estructura esperada del repo:
   streamlit_app.py
   requirements.txt
-  data/MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx
+  MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx
 
 Secrets necesarios en Streamlit Cloud (Manage app -> Settings -> Secrets):
 
