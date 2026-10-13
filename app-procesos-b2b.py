@@ -1,0 +1,1434 @@
+"""
+App de Registro de Parámetros de Calidad - Producto Intermedio (PI) B2B Starbucks
+(v4 - incluye CONTROL DE INOCUIDAD, Plan de Calidad MA-PL-019)
+====================================================================================
+Streamlit + Google Drive/Sheets (histórico mensual, una hoja por día+turno).
+
+Estructura esperada del repo (el Excel de especificaciones va al MISMO NIVEL que
+este archivo y que requirements.txt, no dentro de una carpeta "data/"):
+
+  streamlit_app_pi.py
+  requirements.txt
+  MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx
+
+Secrets necesarios en Streamlit Cloud (Manage app -> Settings -> Secrets):
+
+[gcp_service_account]
+... (mismo bloque que en la app de PT) ...
+
+ROOT_FOLDER_ID = "1h46IR2nUS8TZUSIgl1lD-M4nCtp-p_wW"
+"""
+
+import io
+import re
+from datetime import date
+
+import pandas as pd
+import streamlit as st
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build as build_drive_service
+    GSHEETS_DISPONIBLE = True
+except ImportError:
+    GSHEETS_DISPONIBLE = False
+
+# ----------------------------------------------------------------------------
+# CONFIGURACIÓN GENERAL
+# ----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Registro de Calidad - Producto Intermedio B2B Starbucks",
+    page_icon="🧪",
+    layout="wide",
+)
+
+EXCEL_PATH = "MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx"  # mismo nivel que este .py
+SHEET_NAME = "PROCESO-B2B-STB"
+CLIENTE_FIJO = "STARBUCKS"
+AREA_FIJA = "EMPAQUE"
+
+SUBCARPETA_DRIVE = "Productos Intermedios"
+PLANTILLA_NOMBRE = "Proceso PI - Plantilla Base"
+PLANTILLA_HOJA = "Hoja 1"
+FOOTER_MARCA = "V°B° Jefe de Calidad"
+FILA_ENCABEZADO_PLANTILLA = 4  # fila con los títulos de columna (una fila por muestra, como PT)
+SUFIJO_MES = " - PI"
+
+MESES_ES = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+    7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
+}
+
+EQUIPO_CALIDAD = [
+    "Verónica Iriarte",
+    "Cristina Merino",
+    "Lisseth Aspíllaga",
+    "Sandra Chavez",
+    "Alejandro Herrera",
+    "Katherin Hidalgo",
+]
+
+TURNOS = ["Día", "Tarde", "Madrugada"]
+
+# (clave, etiqueta) en el orden fijo que tendrán las columnas del exportable
+ALL_PARAM_DEFS = [
+    ("peso", "Peso (g)"),
+    ("diametro", "Diámetro (cm)"),
+    ("altura", "Altura/Espesor (cm)"),
+    ("temperatura", "Temperatura (°C)"),
+    ("tamizado", "Tamizado"),
+    ("tiempo_mezcla", "Tiempo Mezcla (min)"),
+    ("decorado", "Decorado"),
+    ("brix", "Brix"),
+    ("organolepticas", "Características Organolépticas"),
+    ("estado_material", "Estado del Material/Equipo/Herramienta"),
+    ("observacion", "Observación/Corrección"),
+]
+
+# ----------------------------------------------------------------------------
+# CONTROL DE INOCUIDAD (Plan MA-PL-019, hoja PROCESO-B2B-STB, columnas "CONTROL DE LA INOCUIDAD")
+# Cada control aplica solo a ciertas actividades (el resto es "NO APLICA" en el plan y NO se
+# muestra al operario). Orden = orden del plan.
+#   nivel "lote"   -> una sola respuesta por actividad (se repite en todas las filas/muestras)
+#   nivel "muestra"-> una respuesta por muestra (hermeticidad: el plan pide muestreo según tabla)
+# ----------------------------------------------------------------------------
+INOCUIDAD_DEFS = [
+    # (clave, pestaña, encabezado del historial, pregunta, nivel)
+    ("desinfeccion", "Desinfección huevo/naranja", "Desinfección Huevo/Naranja (C/NC)",
+     "¿Se realizó la desinfección conforme al plan? ({criterio})", "lote"),
+    ("horneado", "Horneado/Cocción", "Horneado/Cocción (C/NC)",
+     "¿Se cumplió la temperatura y el tiempo de {proceso}? ({criterio})", "lote"),
+    ("enfriado", "Enfriado", "Enfriado (C/NC)",
+     "¿El producto cumple la temperatura de enfriado? ({criterio})", "lote"),
+    ("hermeticidad", "Hermeticidad", "Hermeticidad (C/NC)",
+     "¿El envase cierra herméticamente y se envasó en las condiciones del plan? ({criterio})", "muestra"),
+    ("alergeno", "Control de alérgeno", "Control Alérgeno Frutos Secos (C/NC)",
+     "¿Se realizó y verificó la limpieza/desinfección de control de alérgeno? ({criterio})", "lote"),
+]
+
+# Criterios de inocuidad por (PRODUCTO, COMPONENTE, ACTIVIDAD) — hoja PROCESO-B2B-STB, Plan MA-PL-019 v01 (27.07.26).
+# Claves en MAYÚSCULAS. Orden de controles = orden del plan: desinfección -> horneado/cocción -> enfriado -> hermeticidad -> alérgeno.
+# Si una actividad no aparece aquí, el plan indica 'NO APLICA' para los 5 controles.
+INOCUIDAD_PI = {
+    ('GALLETA CHIP CHOCOLATE', 'MASA GALLETA', 'FORMADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 124°C · Tiempo: 20 min · Dorado: 135°C x 5 min · Frecuencia: cada que hornea',
+    },
+    ('GALLETA CHIP CHOCOLATE', 'GALLETA CHIP', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('GALLETA CHOCOCHOCO', 'MASA GALLETA', 'MEZCLADO HUEVO Y AZÚCAR'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+    },
+    ('GALLETA CHOCOCHOCO', 'MASA GALLETA', 'FORMADO'): {
+        'horneado': 'T°: 128°C · Tiempo: 20 min · Frecuencia: cada que hornea',
+    },
+    ('GALLETA CHOCOCHOCO', 'GALLETA CHOCO', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('GALLETA CRAMBERRIES', 'MASA GALLETA', 'FORMADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T°: 120°C · Tiempo: 18 min · Frecuencia: cada que hornea',
+    },
+    ('GALLETA CRAMBERRIES', 'GALLETA CRANBERRY', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('GALLETA AVENA Y PASAS', 'MASA GALLETA', 'FORMADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T°: 124°C · Tiempo: 18 min · Frecuencia: cada que hornea',
+    },
+    ('GALLETA AVENA Y PASAS', 'GALLETA AVENA Y PASAS', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('GALLETA AVELLANA', 'MASA GALLETA', 'RELLENADO DE NUTELLA'): {
+        'alergeno': 'Alérgeno: avellana · Concentración: 200 ppm · Frecuencia: cada que se procesa L&D UTENSILIOS Y MESA TRABAJO',
+    },
+    ('GALLETA AVELLANA', 'MASA GALLETA', 'FORMADO/DECORADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 124°C · Tiempo: 15 min · Dorado: 135°C x 5 min · Frecuencia: cada que hornea',
+        'alergeno': 'Alérgeno: avellana · Concentración: 200 ppm · Frecuencia: cada que se procesa L&D UTENSILIOS Y MESA TRABAJO',
+    },
+    ('GALLETA AVELLANA', 'GALLETA AVELLANA', 'DECORADO//ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+        'alergeno': 'Alérgeno: avellana · Concentración: 200 ppm · Frecuencia: cada que se procesa L&D UTENSILIOS Y MESA TRABAJO',
+    },
+    ('MUFFIN DE NARANJA CHIP', 'INSUMOS', 'TAMIZADO NARANJA'): {
+        'desinfeccion': 'Desinfección de naranja · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se produzca este muffin',
+    },
+    ('MUFFIN DE NARANJA CHIP', 'MASA DE MUFFIN', 'DOSIFICADO (MECÁNICO)/MANGA'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 125 a 127°C · Tiempo: 30 a 32 min · Frecuencia: cada que hornea',
+    },
+    ('MUFFIN DE NARANJA CHIP', 'MUFFIN NARANJA', 'ENFRIADO/ACONDICIONADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('MUFFIN DE CHOCOLATE', 'MASA DE MUFFIN', 'DOSIFICADO (MECÁNICO)/MANGA'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 125 a 127°C · Tiempo: 30 a 32 min · Frecuencia: cada que hornea',
+    },
+    ('MUFFIN DE CHOCOLATE', 'MUFFIN', 'ENFRIADO/ACONDICIONADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('MUFFIN DE MANZANA', 'INSUMOS', 'REPOSO COMPOTA'): {
+        'horneado': 'T° cocción: 140°C · Tiempo: 50 min · Frecuencia: cada que produce',
+    },
+    ('MUFFIN DE MANZANA', 'MASA DE MUFFIN', 'DOSIFICADO (MECÁNICO)/MANGA'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 125 a 127°C · Tiempo: 30 a 32 min · Frecuencia: cada que hornea',
+    },
+    ('MUFFIN DE MANZANA', 'MUFFIN MANZANA', 'ENFRIADO/ACONDICIONADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('MUFFIN DE BERRIES', 'MASA DE MUFFIN', 'DOSIFICADO (MECÁNICO)/MANGA'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 125 a 127°C · Tiempo: 30 a 32 min · Frecuencia: cada que hornea',
+    },
+    ('MUFFIN DE BERRIES', 'MUFFFIN BERRIES', 'ENFRIADO/ACONDICIONADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('KEKE DE LIMÓN', 'MASA KEKE', 'DOSIFICADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: H1= 133°C y H2: 126°C · Tiempo: 60 min · Frecuencia: cada que hornea',
+    },
+    ('KEKE DE LIMÓN', 'KEKE', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('KEKE DE ZANAHORIA', 'MASA KEKE', 'DOSIFICADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: H1= 133°C y H2: 126°C · Tiempo: 60 min · Frecuencia: cada que hornea',
+    },
+    ('KEKE DE ZANAHORIA', 'KEKE', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+        'alergeno': 'Alérgeno: pecana · Concentración: 200 ppm · Frecuencia: cada que se procesa L&D UTENSILIOS Y MESA TRABAJO',
+    },
+    ('PIE DE LIMON', 'INSUMOS', 'DISOLUCIÓN HUEVO - AZÚCAR'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° dilución: 70°C · Tiempo: llegue T° · Frecuencia: cada que produce',
+    },
+    ('PIE DE LIMON', 'RELLENO PIE', 'DOSIFICADO/RELLENADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+    },
+    ('PIE DE LIMON', 'PIE LIMON', 'ENFRIADO/DECORADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+    },
+    ('CRUMBLE DE BERRIES', 'RELLENO', 'RELLENADO'): {
+        'horneado': 'T° cocción: 140°C · Tiempo: 180 min · Frecuencia: cada que produce',
+    },
+    ('CRUMBLE DE BERRIES', 'CRUMBLE', 'DOSIFICADO/ACONDICIONADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('TORTA CHOCOLATE', 'MASA TORTA', 'BATIDO ADICIÓN DE HUEVO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+    },
+    ('TORTA CHOCOLATE', 'ALMÍBAR', 'HUMECTADO CON ALMÍBAR'): {
+        'horneado': 'T° cocción: 100°C · Tiempo: 5 min · Frecuencia: cada que produce',
+    },
+    ('TORTA CHOCOLATE', 'RELLENO FUDGE', 'DOSIFICADO'): {
+        'horneado': 'T° cocción: 110°C · Tiempo: 52 min · Frecuencia: cada que produce',
+    },
+    ('TORTA CHOCOLATE', 'TORTA PORCIÓN', 'CORTADO/DECORADO'): {
+        'enfriado': 'T°: ≤15°C · Frecuencia: cada que se produzca',
+    },
+    ('CINNAMON', 'MASA CINNAMON', 'PINTADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 - 5 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 120°C · Tiempo: 30 min · Frecuencia: cada que hornea',
+    },
+    ('CINNAMON', 'CINNAMON', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('CHESSCAKE BITE', 'CHESSCAKE BITE', 'CORTADO/DECORADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('GALLETA DECORADA PUMPKIN', 'MASA GALLETA', 'CORTADO (CON CORTADORES DE GALLETA)'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 130°C · Tiempo: 14 min · Frecuencia: cada que hornea',
+    },
+    ('GALLETA DECORADA PUMPKIN', 'GALLETA PUMPKIN', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+}
+
+
+# ----------------------------------------------------------------------------
+# SPECS HARDCODEADAS (productos/actividades que aún no están en el Excel de PI)
+# Agregar aquí nuevas filas sin tocar el Excel base.
+# Estructura: mismas claves que las columnas que lee load_specs().
+# ----------------------------------------------------------------------------
+SPECS_EXTRA_PI = [
+    # ---------- GALLETA DECORADA PUMPKIN ----------
+    {
+        "producto": "GALLETA DECORADA PUMPKIN",
+        "linea_produccion": "LINEA GALLETAS",
+        "linea_haccp": "LINEA GALLETAS",
+        "componente": "MASA GALLETA",
+        "actividad": "LAMINADO DE LA MASA",
+        "tipo": "PI",
+        "peso": "-",
+        "diametro": "-",
+        "altura": "0.4 - 0.6 cm",
+        "temperatura": "AMBIENTE",
+        "tamizado": "LIBRE DE MATERIAL EXTRAÑO",
+        "tiempo_mezcla": None,
+        "decorado": None,
+        "brix": None,
+        "organolepticas": (
+            "Apariencia: Masa laminada uniforme\n"
+            "Sabor: A vainilla, dulce\n"
+            "Olor: A vainilla\n"
+            "Color: Naranja\n"
+            "Textura: Homogénea, suave"
+        ),
+        "estado_material": "RODILLO/MESA LIMPIA",
+        "observacion": None,
+    },
+    {
+        "producto": "GALLETA DECORADA PUMPKIN",
+        "linea_produccion": "LINEA GALLETAS",
+        "linea_haccp": "LINEA GALLETAS",
+        "componente": "MASA GALLETA",
+        "actividad": "CORTADO (CON CORTADORES DE GALLETA)",
+        "tipo": "PI",
+        "peso": "29 +/- 1 g",
+        "diametro": "-",
+        "altura": "0.4 - 0.6 cm",
+        "temperatura": "AMBIENTE",
+        "tamizado": "LIBRE DE MATERIAL EXTRAÑO",
+        "tiempo_mezcla": None,
+        "decorado": None,
+        "brix": None,
+        "organolepticas": (
+            "Apariencia: Forma de calabaza bien definida\n"
+            "Sabor: A vainilla, dulce\n"
+            "Olor: A vainilla\n"
+            "Color: Naranja\n"
+            "Textura: Homogénea, sin grietas"
+        ),
+        "estado_material": "CORTADORES LIMPIOS, MESA/CORTADORA LIMPIA",
+        "observacion": None,
+    },
+    {
+        "producto": "GALLETA DECORADA PUMPKIN",
+        "linea_produccion": "LINEA GALLETAS",
+        "linea_haccp": "LINEA GALLETAS",
+        "componente": "GALLETA PUMPKIN",
+        "actividad": "DECORADO/ENFRIADO",
+        "tipo": "PI",
+        "peso": "27 +/- 1 g",
+        "diametro": "-",
+        "altura": "0.5 - 0.8 cm",
+        "temperatura": "<25 °C",
+        "tamizado": None,
+        "tiempo_mezcla": None,
+        "decorado": "PARTES BLANCAS Y PUNTO VERDE",
+        "brix": None,
+        "organolepticas": (
+            "Apariencia: Galleta en forma de calabaza\n"
+            "Sabor: A vainilla, dulce\n"
+            "Olor: A vainilla, dulce\n"
+            "Color: Naranja con partes blancas y punto verde\n"
+            "Textura: Crocante y suave"
+        ),
+        "estado_material": "MANGA LIMPIA, SIN ROTURAS NI CONTAMINACIÓN",
+        "observacion": None,
+    },
+]
+
+
+def _inyectar_specs_hardcoded_pi(df: pd.DataFrame) -> pd.DataFrame:
+    """Añade las filas de SPECS_EXTRA_PI al DataFrame de specs cargado del Excel.
+    Si una combinación (producto, componente, actividad) ya existe en el Excel,
+    no se duplica."""
+    combos_existentes = set(
+        zip(
+            df["producto"].str.upper(),
+            df["componente"].str.upper(),
+            df["actividad"].str.upper(),
+        )
+    )
+    filas_nuevas = [
+        r for r in SPECS_EXTRA_PI
+        if (r["producto"].upper(), r["componente"].upper(), r["actividad"].upper())
+        not in combos_existentes
+    ]
+    if not filas_nuevas:
+        return df
+    df_extra = pd.DataFrame(filas_nuevas)
+    return pd.concat([df, df_extra], ignore_index=True)
+
+
+def _norm_clave(x) -> str:
+    return re.sub(r"\s+", " ", str(x)).strip().upper()
+
+
+def inocuidad_de_actividad(producto, componente, actividad) -> dict:
+    """Devuelve {clave_control: criterio} para la actividad (vacío si no aplica ninguno)."""
+    return INOCUIDAD_PI.get((_norm_clave(producto), _norm_clave(componente), _norm_clave(actividad)), {})
+
+
+def nombre_proceso_termico(criterio: str) -> str:
+    c = criterio.lower()
+    if "dilución" in c:
+        return "dilución"
+    if "hornea" in c:
+        return "horneado"
+    return "cocción"
+
+
+# ----------------------------------------------------------------------------
+# EQUIPOS DE MEDICIÓN (solo BALANZAS y TERMÓMETROS usados en la inspección de procesos (PI))
+# (codigo, nombre, ubicación). Se muestran en el paso 6 y se guarda el CÓDIGO.
+# Para las balanzas que no tienen código de inventario se usa la etiqueta del equipo
+# (ej. "CLD-02"). Fuera de esta lista quedan a propósito: balanzas de dosimetría,
+# cocina y almacén, y otros equipos (luxómetro, termohigrómetro, datalogger, pesas patrón).
+# Para agregar/quitar un equipo basta editar estas listas.
+# ----------------------------------------------------------------------------
+BALANZAS_PI = [
+    ("SFBA-001", "BALANZA BA-001 OHAUS", "SALA DE FORMADO"),
+    ("SFBA-002", "BALANZA PR-02 OHAUS", "SALA DE FORMADO"),
+    ("SFBA-003", "BALANZA PR-03 SUPER-SS", "SALA DE FORMADO"),
+    ("SFBA-005", "BALANZA PR-05 JADEVER", "SALA DE FORMADO"),
+    ("SDBA-001", "BALANZA RE-01 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-002", "BALANZA RE-02 (SC) SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-003", "BALANZA RE-03 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-004", "BALANZA RE-06 OHAUS", "SALA DE DECORADO"),
+    ("SDBA-005", "BALANZA RE-08 JADEVER", "MUFFIN"),
+    ("SDBA-006", "BALANZA RE-09 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-007", "BALANZA RE-10 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-008", "BALANZA RE-11 SUPER-SS", "PROCESOS"),
+    ("SDBA-009", "BALANZA RE-12 JADEVER", "SALA DE DECORADO"),
+    ("SDBA-010", "BALANZA RE-13 SUPER-SS", "SALA DE DECORADO"),
+    ("CLD-01", "BALANZA CLD-01 TRUPER", "CALIDAD"),
+    ("CLD-02", "BALANZA CLD-02 TRUPER", "CALIDAD"),
+    ("CA-02", "BALANZA CA-02 PRECISA", "PRODUCCION"),
+    ("RE-05", "BALANZA RE-05 JADEVER", "GALLETON"),
+    ("PRO-13", "BALANZA PRO-13 SUPER-SS", "CHEESE CAKE"),
+    ("PRO-14", "BALANZA PRO-14 SUPER-SS", "PROCESOS"),
+    ("PRO-11", "BALANZA PRO-11 SUPER-SS", "PROCESOS"),
+    ("DEC-01", "BALANZA DEC-01 SUPER-SS", "PROCESOS"),
+    ("RE04", "BALANZA RE04", "PROCESOS"),
+    ("PRO15", "BALANZA PRO15", "PROCESOS"),
+    ("PRO03", "BALANZA PRO03", "PROCESOS"),
+    ("EMP 01", "BALANZA EMP 01", "PROCESOS"),
+    ("REL-02", "BALANZA REL-02", "PROCESOS"),
+    ("PRO10", "BALANZA PRO10", "PROCESOS"),
+]
+
+TERMOMETROS_PI = [
+    ("TER-003", "TERMÓMETRO INFRARROJO TER-003", "CALIDAD"),
+    ("TER-004", "TERMÓMETRO INFRARROJO TER-004", "CALIDAD"),
+    ("TER-005", "TERMÓMETRO INFRARROJO TER-005", "CALIDAD"),
+    ("TER-006", "TERMÓMETRO INFRARROJO TER-006", "ALMACEN"),
+    ("M1 CAL", "TERMÓMETRO DIGITAL M1 CAL", "CALIDAD"),
+    ("M3CAL", "TERMÓMETRO DIGITAL M3CAL", "CALIDAD"),
+    ("M4CAL", "TERMÓMETRO DIGITAL M4CAL", "CALIDAD"),
+    ("PT O1", "TERMÓMETRO DIGITAL PT O1 (patrón)", "CALIDAD - PATRÓN"),
+]
+
+
+def etiqueta_equipo(eq) -> str:
+    """Texto que ve el usuario en la lista: CÓDIGO · NOMBRE · UBICACIÓN."""
+    codigo, nombre, ubicacion = eq
+    return f"{codigo}  ·  {nombre}  ·  {ubicacion}"
+
+
+# Encabezados EXACTOS de la plantilla — UNA FILA POR MUESTRA (igual que PT).
+# Orden del plan: ... Estado del material -> CONTROL INOCUIDAD (5) -> Observación/Corrección.
+PARAMS_ANTES_INOCUIDAD = [d for d in ALL_PARAM_DEFS if d[0] != "observacion"]
+HEADERS_EXPORT = (
+    ["FECHA", "AREA", "CLIENTE", "N° de Muestra", "Línea HACCP", "Producto", "Componente", "Actividad"]
+    + [label for _, label in PARAMS_ANTES_INOCUIDAD]
+    + [h for _, _, h, _, _ in INOCUIDAD_DEFS]
+    + ["Observación/Corrección"]
+    + ["Código de Balanza", "Código de Termómetro"]
+    + ["Conclusión", "Iniciales"]
+)
+
+
+
+def _es_marcador_footer(texto) -> bool:
+    """True si la celda es el pie de firma de la plantilla ('V°B° Jefe de Calidad',
+    'V°B° Supervisor de Calidad', 'VB° Jefe de Calidad'...). Se ignoran °, º, espacios y
+    mayúsculas para que un cambio menor de texto en la plantilla no rompa la detección."""
+    t = str(texto).upper()
+    for ch in ("°", "º", " ", "\n"):
+        t = t.replace(ch, "")
+    return t.startswith("VB") and "CALIDAD" in t
+
+
+def iniciales(nombre_completo: str) -> str:
+    partes = nombre_completo.strip().split()
+    if len(partes) < 2:
+        return nombre_completo[:2].upper()
+    return (partes[0][0] + partes[-1][0]).upper()
+
+
+def nombre_mes_es(fecha: date) -> str:
+    return f"{MESES_ES[fecha.month]} {fecha.year}{SUFIJO_MES}"
+
+
+# ----------------------------------------------------------------------------
+# TABLA MIL-STD-105E - Nivel de Inspección Especial S-2, Inspección Rigurosa
+# (Tightened, Tabla II-B), AQL 4.0% — misma tabla que usamos en la app de PT
+# ----------------------------------------------------------------------------
+SAMPLING_TABLE_S2 = [
+    (2, 8, "A", 2, 0, 1),
+    (9, 15, "A", 2, 0, 1),
+    (16, 25, "B", 3, 0, 1),
+    (26, 50, "B", 3, 0, 1),
+    (51, 90, "B", 3, 0, 1),
+    (91, 150, "C", 5, 0, 1),
+    (151, 280, "C", 5, 0, 1),
+    (281, 500, "C", 5, 0, 1),
+    (501, 1200, "D", 8, 1, 2),
+    (1201, 3200, "D", 8, 1, 2),
+    (3201, 10000, "D", 8, 1, 2),
+    (10001, 35000, "E", 13, 1, 2),
+    (35001, 150000, "E", 13, 1, 2),
+    (150001, 10_000_000, "E", 13, 1, 2),
+]
+
+
+def get_sample_size(lot_size: int):
+    for low, high, letter, n, ac, re_ in SAMPLING_TABLE_S2:
+        if low <= lot_size <= high:
+            return letter, n, ac, re_
+    if lot_size < 2:
+        return "A", 2, 0, 1
+    return "E", 13, 1, 2
+
+
+# ----------------------------------------------------------------------------
+# CARGA Y LIMPIEZA DE DATOS DEL EXCEL
+# ----------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_specs(excel_bytes: bytes) -> pd.DataFrame:
+    df_raw = pd.read_excel(
+        io.BytesIO(excel_bytes),
+        sheet_name=SHEET_NAME,
+        header=None,
+        skiprows=7,
+    )
+
+    cols = [
+        "producto", "linea_produccion", "linea_haccp", "componente", "actividad",
+        "tipo", "peso", "diametro", "altura", "temperatura", "tamizado",
+        "tiempo_mezcla", "decorado", "brix", "organolepticas", "estado_material",
+    ]
+    # Layout del Excel: el plan nuevo (v01, 27.07.26) trae 5 columnas de CONTROL DE INOCUIDAD
+    # entre "Estado del material" y "Responsable". Los criterios de inocuidad se leen de
+    # INOCUIDAD_PI (dentro de este código), así que aquí solo se saltan esas columnas.
+    hdr = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=SHEET_NAME, header=None, nrows=7)
+    layout_con_inocuidad = hdr.astype(str).apply(
+        lambda col: col.str.contains("INOCUIDAD", case=False, na=False)
+    ).any().any()
+    if layout_con_inocuidad:
+        cols = cols + ["_q", "_r", "_s", "_t", "_u"]
+    cols = cols + ["responsable", "observacion"]
+    df_raw = df_raw.iloc[:, : len(cols)]
+    df_raw.columns = cols
+
+    # Solo nos quedamos con filas que tengan actividad (evita filas totalmente vacías)
+    df_raw = df_raw[df_raw["actividad"].notna()].copy()
+
+    # En el Excel, el criterio "PUNTO NIEVE: PICO FIRME Y ESTABLE" (merengue) quedó escrito en la
+    # columna RESPONSABLE en vez de Observación: se traslada a observación.
+    resp_txt = df_raw["responsable"].astype(str).str.strip().str.upper()
+    mask_obs = df_raw["responsable"].notna() & ~resp_txt.isin(["A.C.", "AC", "A.C", "NAN", ""]) \
+        & df_raw["observacion"].isna()
+    df_raw.loc[mask_obs, "observacion"] = df_raw.loc[mask_obs, "responsable"]
+
+    def clean_txt(x):
+        if pd.isna(x):
+            return x
+        return re.sub(r"\s+", " ", str(x)).strip()
+
+    text_cols = [
+        "producto", "linea_produccion", "linea_haccp", "componente", "actividad",
+        "peso", "diametro", "altura", "temperatura", "tamizado", "tiempo_mezcla",
+        "decorado", "brix", "organolepticas", "estado_material", "observacion",
+    ]
+    for c in text_cols:
+        df_raw[c] = df_raw[c].apply(clean_txt)
+
+    # Forward-fill: producto/línea de producción/línea HACCP solo aparecen en la
+    # primera fila de cada grupo, el resto queda en blanco en el Excel original.
+    for c in ["producto", "linea_produccion", "linea_haccp"]:
+        df_raw[c] = df_raw[c].ffill()
+
+    df_raw["producto"] = df_raw["producto"].str.upper()
+    df_raw["linea_haccp"] = df_raw["linea_haccp"].str.upper()
+
+    df_raw = df_raw[df_raw["tipo"].astype(str).str.upper().str.strip() == "PI"]
+
+    return df_raw.reset_index(drop=True)
+
+
+def campo_aplica(valor) -> bool:
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return False
+    v = str(valor).strip()
+    return v not in ("", "-", "—", "nan", "None")
+
+
+def get_excel_bytes():
+    try:
+        with open(EXCEL_PATH, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        st.warning(
+            f"No encontré el archivo `{EXCEL_PATH}` en la raíz del repositorio."
+        )
+        up = st.file_uploader("Sube el Excel de especificaciones (.xlsx)", type=["xlsx"])
+        if up is not None:
+            return up.read()
+        st.stop()
+
+
+# ----------------------------------------------------------------------------
+# CONEXIÓN A GOOGLE DRIVE / SHEETS
+# ----------------------------------------------------------------------------
+def get_gsheet_client_and_drive():
+    if not GSHEETS_DISPONIBLE:
+        return None, None
+    try:
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        gc = gspread.authorize(creds)
+        drive = build_drive_service("drive", "v3", credentials=creds)
+        return gc, drive
+    except Exception:
+        return None, None
+
+
+def _buscar_archivo_en_carpeta(drive, nombre: str, carpeta_id: str, es_carpeta: bool = False):
+    """Busca por nombre exacto dentro de una carpeta. Devuelve el ID o None."""
+    tipo_mime = "application/vnd.google-apps.folder" if es_carpeta else "application/vnd.google-apps.spreadsheet"
+    query = (
+        f"name = '{nombre}' and '{carpeta_id}' in parents "
+        f"and mimeType = '{tipo_mime}' and trashed = false"
+    )
+    resultado = drive.files().list(q=query, fields="files(id, name)").execute()
+    archivos = resultado.get("files", [])
+    return archivos[0]["id"] if archivos else None
+
+
+def get_or_create_month_spreadsheet_id(drive, root_folder_id: str, fecha: date) -> str:
+    """Devuelve el ID del Google Sheets del mes correspondiente.
+
+    IMPORTANTE: las cuentas de servicio no tienen cuota propia de almacenamiento
+    en Drive, así que NO pueden crear archivos nuevos (falla con
+    'storageQuotaExceeded'). Por eso, si el archivo del mes no existe todavía,
+    en vez de copiarlo automáticamente le pedimos a la persona que lo duplique
+    manualmente una vez (queda con su propia cuota de Drive).
+    """
+    subcarpeta_id = _buscar_archivo_en_carpeta(drive, SUBCARPETA_DRIVE, root_folder_id, es_carpeta=True)
+    if subcarpeta_id is None:
+        raise RuntimeError(f"No encontré la subcarpeta '{SUBCARPETA_DRIVE}' dentro de la carpeta raíz.")
+
+    nombre_mes = nombre_mes_es(fecha)
+    archivo_mes_id = _buscar_archivo_en_carpeta(drive, nombre_mes, subcarpeta_id)
+    if archivo_mes_id:
+        return archivo_mes_id
+
+    raise RuntimeError(
+        f"Todavía no existe el archivo del mes '{nombre_mes}' dentro de "
+        f"'{SUBCARPETA_DRIVE}'. Duplica manualmente '{PLANTILLA_NOMBRE}' en esa "
+        f"carpeta de Drive y renómbralo exactamente '{nombre_mes}' (Google no "
+        f"permite que la cuenta de servicio cree archivos nuevos automáticamente)."
+    )
+
+
+def _encontrar_fila_footer(ws) -> int | None:
+    valores = ws.get_all_values()
+    for idx, fila in enumerate(valores, start=1):
+        if fila and _es_marcador_footer(fila[0]):
+            return idx
+        # el marcador puede no estar en la columna A si se corrió por el merge
+        for celda in fila:
+            if _es_marcador_footer(celda):
+                return idx
+    return None
+
+
+def get_or_create_daily_worksheet(spreadsheet, fecha: date, turno: str):
+    """Abre (o crea, duplicando la plantilla) la pestaña del día + turno."""
+    titulo_hoja = f"{fecha.strftime('%Y-%m-%d')} {turno}"
+    try:
+        return spreadsheet.worksheet(titulo_hoja)
+    except gspread.exceptions.WorksheetNotFound:
+        pass
+
+    plantilla = spreadsheet.worksheet(PLANTILLA_HOJA)
+    ws = spreadsheet.duplicate_sheet(source_sheet_id=plantilla.id, new_sheet_name=titulo_hoja)
+
+    fila_footer = _encontrar_fila_footer(ws)
+    primera_fila_datos = FILA_ENCABEZADO_PLANTILLA + 1
+    if fila_footer and fila_footer > primera_fila_datos:
+        ws.delete_rows(primera_fila_datos, fila_footer - 1)
+
+    return ws
+
+
+def _leer_combinaciones_de_hoja(ws) -> set:
+    """Lee de una worksheet ya abierta qué combinaciones Producto+Componente+Actividad
+    tiene registradas. Devuelve un conjunto vacío si no hay datos o falta el encabezado."""
+    valores = ws.get_all_values()
+    if len(valores) < FILA_ENCABEZADO_PLANTILLA:
+        return set()
+
+    encabezado = valores[FILA_ENCABEZADO_PLANTILLA - 1]
+    indices = {}
+    for idx, h in enumerate(encabezado):
+        h_norm = h.strip().upper()
+        if h_norm == "PRODUCTO":
+            indices["producto"] = idx
+        elif h_norm == "COMPONENTE":
+            indices["componente"] = idx
+        elif h_norm == "ACTIVIDAD":
+            indices["actividad"] = idx
+    if len(indices) < 3:
+        return set()
+
+    combinaciones = set()
+    for fila in valores[FILA_ENCABEZADO_PLANTILLA:]:
+        if fila and _es_marcador_footer(fila[0]):
+            break
+        if len(fila) > max(indices.values()):
+            combo = (
+                fila[indices["producto"]].strip().upper(),
+                fila[indices["componente"]].strip().upper(),
+                fila[indices["actividad"]].strip().upper(),
+            )
+            if all(combo):
+                combinaciones.add(combo)
+    return combinaciones
+
+
+def obtener_actividades_registradas(fecha: date, turno: str = None) -> set:
+    """Lee (sin crear nada) qué combinaciones Producto+Componente+Actividad ya
+    tienen registro en CUALQUIER hoja (Día, Tarde, Madrugada) de esa fecha, para
+    evitar que una misma actividad se registre dos veces en distintos turnos del
+    mismo día. El parámetro 'turno' se mantiene solo por compatibilidad y ya no
+    limita la búsqueda. Si el archivo del mes todavía no existe, devuelve un
+    conjunto vacío."""
+    gc, drive = get_gsheet_client_and_drive()
+    if gc is None or drive is None:
+        return set()
+    try:
+        root_folder_id = st.secrets.get("ROOT_FOLDER_ID")
+        if not root_folder_id:
+            return set()
+
+        subcarpeta_id = _buscar_archivo_en_carpeta(drive, SUBCARPETA_DRIVE, root_folder_id, es_carpeta=True)
+        if subcarpeta_id is None:
+            return set()
+
+        nombre_mes = nombre_mes_es(fecha)
+        archivo_mes_id = _buscar_archivo_en_carpeta(drive, nombre_mes, subcarpeta_id)
+        if archivo_mes_id is None:
+            return set()
+
+        spreadsheet = gc.open_by_key(archivo_mes_id)
+
+        combinaciones = set()
+        for t in TURNOS:
+            titulo_hoja = f"{fecha.strftime('%Y-%m-%d')} {t}"
+            try:
+                ws = spreadsheet.worksheet(titulo_hoja)
+            except gspread.exceptions.WorksheetNotFound:
+                continue
+            combinaciones |= _leer_combinaciones_de_hoja(ws)
+        return combinaciones
+    except Exception:
+        return set()
+
+
+def guardar_en_google_sheets(filas: list) -> tuple:
+    """Guarda varias filas (una por muestra) en la hoja del día+turno correspondiente."""
+    gc, drive = get_gsheet_client_and_drive()
+    if gc is None or drive is None:
+        return False, "No se pudo conectar a Google Drive/Sheets (revisa los Secrets configurados)."
+    try:
+        root_folder_id = st.secrets.get("ROOT_FOLDER_ID")
+        if not root_folder_id:
+            return False, "No se encontró ROOT_FOLDER_ID en los Secrets."
+
+        fecha = st.session_state.fecha_produccion
+        turno = st.session_state.turno
+
+        spreadsheet_id = get_or_create_month_spreadsheet_id(drive, root_folder_id, fecha)
+        spreadsheet = gc.open_by_key(spreadsheet_id)
+        ws = get_or_create_daily_worksheet(spreadsheet, fecha, turno)
+
+        fila_footer = _encontrar_fila_footer(ws)
+        if fila_footer is None:
+            ws.append_rows(filas, table_range="A1")  # respaldo: siempre desde la columna A
+        else:
+            ws.insert_rows(filas, row=fila_footer)
+
+        return True, (
+            f"Guardado en '{nombre_mes_es(fecha)}' → hoja "
+            f"'{fecha.strftime('%Y-%m-%d')} {turno}'."
+        )
+    except Exception as e:
+        return False, f"Error al guardar en Google Sheets: {e}"
+
+
+# ----------------------------------------------------------------------------
+# ESTADO / WIZARD
+# ----------------------------------------------------------------------------
+if "step" not in st.session_state:
+    st.session_state.step = 1
+
+
+def go_next():
+    st.session_state.step += 1
+
+
+def go_back():
+    st.session_state.step -= 1
+
+
+excel_bytes = get_excel_bytes()
+specs_df = _inyectar_specs_hardcoded_pi(load_specs(excel_bytes))
+
+# ============================================================================
+# PASO 1 - PORTADA
+# ============================================================================
+if st.session_state.step == 1:
+    st.title("🧪 Registro de Parámetros de Calidad")
+    st.subheader("Producto Intermedio (PI) - Línea de Producción B2B Starbucks")
+    st.markdown(
+        """
+        Esta aplicación permite al **equipo de calidad** registrar la inspección
+        de producto **intermedio** (etapas del proceso, no producto terminado)
+        de la línea B2B Starbucks, siguiendo el plan de muestreo
+        **MIL-STD-105E (Nivel Especial S-2, Inspección Rigurosa, AQL 4.0%)**
+        cuando aplica número de batch.
+        """
+    )
+    st.button("Comenzar registro ➜", on_click=go_next, type="primary")
+
+# ============================================================================
+# PASO 2 - EQUIPO DE CALIDAD, TURNO Y FECHA
+# ============================================================================
+elif st.session_state.step == 2:
+    st.header("1️⃣ Datos del registro")
+
+    responsable = st.selectbox(
+        "Equipo de calidad (responsable del registro)",
+        EQUIPO_CALIDAD,
+        index=EQUIPO_CALIDAD.index(st.session_state.get("responsable", EQUIPO_CALIDAD[0]))
+        if st.session_state.get("responsable") in EQUIPO_CALIDAD else 0,
+    )
+
+    turno = st.selectbox(
+        "Turno",
+        TURNOS,
+        index=TURNOS.index(st.session_state.get("turno", TURNOS[0]))
+        if st.session_state.get("turno") in TURNOS else 0,
+    )
+
+    fecha_produccion = st.date_input(
+        "Fecha de producción (= fecha de registro)",
+        value=st.session_state.get("fecha_produccion", None),
+        format="DD/MM/YYYY",
+    )
+    if fecha_produccion is None:
+        st.caption("⚠️ Selecciona la fecha para continuar (no se precarga sola).")
+
+    st.info(f"**Cliente:** {CLIENTE_FIJO}  |  **Área:** {AREA_FIJA}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary", disabled=fecha_produccion is None):
+            st.session_state.responsable = responsable
+            st.session_state.turno = turno
+            st.session_state.fecha_produccion = fecha_produccion
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 3 - LÍNEA HACCP Y PRODUCTO
+# ============================================================================
+elif st.session_state.step == 3:
+    st.header("2️⃣ Línea HACCP y producto")
+
+    lineas = sorted(specs_df["linea_haccp"].dropna().unique().tolist())
+    linea_sel = st.selectbox("Línea de producción HACCP", lineas)
+
+    productos_linea = sorted(
+        specs_df.loc[specs_df["linea_haccp"] == linea_sel, "producto"].unique().tolist()
+    )
+    producto_sel = st.selectbox("Producto", productos_linea)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.linea_haccp = linea_sel
+            st.session_state.producto = producto_sel
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 4 - ACTIVIDAD (filtrada por producto, distinguiendo repetidas)
+# ============================================================================
+elif st.session_state.step == 4:
+    st.header("3️⃣ Actividad realizada")
+
+    cache_key = st.session_state.fecha_produccion
+    if st.session_state.get("actividades_cache_key") != cache_key:
+        with st.spinner("Revisando qué actividades ya se registraron ese día (en cualquier turno)..."):
+            st.session_state.actividades_registradas = obtener_actividades_registradas(
+                st.session_state.fecha_produccion
+            )
+        st.session_state.actividades_cache_key = cache_key
+    actividades_hechas = st.session_state.actividades_registradas
+
+    producto_actual = st.session_state.producto.strip().upper()
+    filas_prod = specs_df[specs_df["producto"] == st.session_state.producto].reset_index(drop=True)
+
+    opciones = []
+    ya_registradas_labels = []
+    for idx, fila in filas_prod.iterrows():
+        combo = (producto_actual, fila["componente"].strip().upper(), fila["actividad"].strip().upper())
+        etiqueta = f"{fila['actividad']} — {fila['componente']}"
+        if combo in actividades_hechas:
+            ya_registradas_labels.append(etiqueta)
+            continue
+        opciones.append((idx, etiqueta))
+
+    if ya_registradas_labels:
+        st.warning(
+            f"⚠️ Ya hay registro (en algún turno) de "
+            f"{st.session_state.fecha_produccion.strftime('%d/%m/%Y')} para: "
+            + ", ".join(ya_registradas_labels) +
+            ". No aparecen abajo para evitar duplicados (el producto sí puede repetirse con otra actividad)."
+        )
+
+    if not opciones:
+        st.error(
+            "Todas las actividades de este producto ya fueron registradas ese día, en algún turno. "
+            "Elige otro producto, u otra fecha si corresponde."
+        )
+        st.button("⬅ Atrás", on_click=go_back)
+        st.stop()
+
+    idx_sel = st.selectbox(
+        "Selecciona la actividad realizada",
+        options=[idx for idx, _ in opciones],
+        format_func=lambda i: dict(opciones)[i],
+    )
+    fila_actividad = filas_prod.loc[idx_sel]
+
+    with st.expander("📋 Ficha de referencia de esta actividad", expanded=True):
+        for clave, label in PARAMS_ANTES_INOCUIDAD:
+            valor = fila_actividad[clave]
+            if campo_aplica(valor):
+                st.markdown(f"**{label}:** {valor}")
+        inocu_ref = inocuidad_de_actividad(
+            st.session_state.producto, fila_actividad["componente"], fila_actividad["actividad"]
+        )
+        for clave, tab_label, _, _, _ in INOCUIDAD_DEFS:
+            if clave in inocu_ref:
+                st.markdown(f"🛡️ **{tab_label}:** {inocu_ref[clave]}")
+        valor_obs = fila_actividad["observacion"]
+        if campo_aplica(valor_obs):
+            st.markdown(f"**Observación/Corrección:** {valor_obs}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.fila_actividad = fila_actividad.to_dict()
+            st.session_state.inocuidad_actividad = inocuidad_de_actividad(
+                st.session_state.producto, fila_actividad["componente"], fila_actividad["actividad"]
+            )
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 5 - ¿APLICA NÚMERO DE BATCH? Y MUESTREO
+# ============================================================================
+elif st.session_state.step == 5:
+    st.header("4️⃣ Batch y muestreo")
+
+    aplica_batch = st.radio(
+        "¿Aplica registrar un número de batch para esta actividad?",
+        ["Sí", "No"],
+        horizontal=True,
+        help="Elige 'No' para procesos generales que aún no se han separado en "
+             "batches (ej. un batido que luego se dosifica). En ese caso se evalúa 1 sola muestra.",
+    )
+
+    if aplica_batch == "Sí":
+        batch_size = st.number_input("¿Cuántas unidades tiene el batch?", min_value=1, step=1, value=300)
+        letra, n_muestras, ac, re_ = get_sample_size(int(batch_size))
+        st.success(
+            f"Para un batch de **{int(batch_size)}** unidades: letra código **{letra}** → "
+            f"**n = {n_muestras}** muestras. Criterio: Aceptar con **{ac}** o menos no conformes, "
+            f"Rechazar con **{re_}** o más."
+        )
+    else:
+        batch_size = None
+        letra, n_muestras, ac, re_ = None, 1, None, None
+        st.info("No aplica número de batch — se evaluará como **1 sola muestra**.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.aplica_batch = aplica_batch
+            st.session_state.batch_size = batch_size
+            st.session_state.n_muestras = n_muestras
+            st.session_state.letra_codigo = letra
+            st.session_state.ac = ac
+            st.session_state.re_ = re_
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 6 - EQUIPOS DE MEDICIÓN (balanza y termómetro) - solo los que aplican a la actividad
+# ============================================================================
+elif st.session_state.step == 6:
+    st.header("5️⃣ Equipos de medición utilizados")
+
+    fila = st.session_state.fila_actividad
+    criterios_in = st.session_state.get("inocuidad_actividad", {})
+    # Balanza: solo si la actividad pesa (parámetro Peso). Termómetro: si mide temperatura
+    # o tiene un control de inocuidad térmico (horneado/cocción, enfriado, hermeticidad).
+    aplica_balanza = campo_aplica(fila["peso"])
+    aplica_termometro = campo_aplica(fila["temperatura"]) or any(
+        c in criterios_in for c in ("horneado", "enfriado", "hermeticidad")
+    )
+
+    st.markdown(f"**Producto:** {st.session_state.producto} &nbsp;|&nbsp; "
+                f"**Actividad:** {fila['actividad']} — {fila['componente']}")
+
+    bal_sel = ter_sel = None
+    if not aplica_balanza and not aplica_termometro:
+        st.info("Esta actividad no requiere balanza ni termómetro. Puedes continuar.")
+    else:
+        st.caption("Selecciona los equipos que usaste en esta actividad. Se guardará el código de "
+                   "cada equipo en el historial. Solo se piden los equipos que aplican.")
+
+    if aplica_balanza:
+        ubicaciones = sorted({u for _, _, u in BALANZAS_PI})
+        filtro_ub = st.selectbox("Filtrar balanzas por ubicación (opcional)", ["Todas"] + ubicaciones)
+        balanzas_op = [b for b in BALANZAS_PI if filtro_ub == "Todas" or b[2] == filtro_ub]
+        bal_previa = st.session_state.get("balanza_sel")
+        idx_bal = next((i for i, b in enumerate(balanzas_op) if b[0] == bal_previa), None)
+        bal_sel = st.selectbox(
+            "Balanza utilizada", balanzas_op, index=idx_bal,
+            format_func=etiqueta_equipo, placeholder="Selecciona la balanza...",
+            key=f"widget_balanza_{filtro_ub}",
+        )
+    elif aplica_termometro:
+        st.caption("⚖️ Balanza: no aplica (la actividad no registra peso).")
+
+    if aplica_termometro:
+        ter_previo = st.session_state.get("termometro_sel")
+        idx_ter = next((i for i, t in enumerate(TERMOMETROS_PI) if t[0] == ter_previo), None)
+        ter_sel = st.selectbox(
+            "Termómetro utilizado", TERMOMETROS_PI, index=idx_ter,
+            format_func=etiqueta_equipo, placeholder="Selecciona el termómetro...",
+            key="widget_termometro",
+        )
+    elif aplica_balanza:
+        st.caption("🌡️ Termómetro: no aplica (la actividad no registra temperatura).")
+
+    listo = (not aplica_balanza or bal_sel is not None) and (not aplica_termometro or ter_sel is not None)
+    if not listo:
+        st.caption("⚠️ Selecciona los equipos indicados para continuar.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary", disabled=not listo):
+            st.session_state.balanza_sel = bal_sel[0] if bal_sel else "No aplica"
+            st.session_state.termometro_sel = ter_sel[0] if ter_sel else "No aplica"
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 7 - REGISTRO DE PARÁMETROS POR MUESTRA
+# ============================================================================
+elif st.session_state.step == 7:
+    st.header("6️⃣ Registro de parámetros por muestra")
+
+    fila = st.session_state.fila_actividad
+    n = st.session_state.n_muestras
+
+    st.markdown(f"**Producto:** {st.session_state.producto} &nbsp;|&nbsp; "
+                f"**Actividad:** {fila['actividad']} — {fila['componente']} &nbsp;|&nbsp; "
+                f"**N° de muestras a evaluar:** {n}")
+
+    parametros = []
+    for clave, label in ALL_PARAM_DEFS:
+        valor = fila[clave]
+        if not campo_aplica(valor):
+            continue  # se omite: tenía "-" o estaba vacío
+        if clave == "organolepticas":
+            pregunta = "¿Las características organolépticas cumplen con lo especificado?"
+        elif clave == "estado_material":
+            pregunta = f"¿El estado del material/equipo/herramienta cumple con lo especificado? ({valor})"
+        elif clave == "observacion":
+            pregunta = f"¿Se cumple con la observación/corrección indicada? ({valor})"
+        else:
+            pregunta = f"¿{label} cumple con lo especificado? ({valor})"
+        parametros.append((clave, label, pregunta))
+
+    if not parametros:
+        st.warning("Esta actividad no tiene parámetros de control aplicables.")
+    else:
+        if "organolepticas" in [p[0] for p in parametros]:
+            with st.expander("Ver detalle completo de características organolépticas"):
+                st.text(fila["organolepticas"])
+
+        st.caption("Completa cada muestra tocando 'Conforme' o 'No conforme'. Si algún parámetro "
+                   "tiene 1 o más 'No conforme', se habilitará un cuadro de comentario al final de esa pestaña.")
+
+        if "respuestas" not in st.session_state:
+            st.session_state.respuestas = {}
+        if "comentarios_parametro" not in st.session_state:
+            st.session_state.comentarios_parametro = {}
+
+        tabs = st.tabs([label for _, label, _ in parametros])
+        for (clave, label, pregunta), tab in zip(parametros, tabs):
+            with tab:
+                st.markdown(f"**{pregunta}**")
+                hay_no_conforme = False
+                for i in range(n):
+                    key = f"resp_{clave}_{i}"
+                    if key not in st.session_state.respuestas:
+                        st.session_state.respuestas[key] = "Conforme"
+                    valor_actual = st.session_state.respuestas[key]
+                    idx_default = 0 if valor_actual == "Conforme" else 1
+                    st.session_state.respuestas[key] = st.radio(
+                        f"Muestra {i + 1}",
+                        ["Conforme", "No conforme"],
+                        index=idx_default,
+                        horizontal=True,
+                        key=f"widget_{key}",
+                    )
+                    if st.session_state.respuestas[key] == "No conforme":
+                        hay_no_conforme = True
+
+                if hay_no_conforme:
+                    st.session_state.comentarios_parametro[clave] = st.text_area(
+                        f"Comentario / corrección para '{label}' (hay al menos 1 muestra No conforme)",
+                        value=st.session_state.comentarios_parametro.get(clave, ""),
+                        key=f"comentario_{clave}",
+                    )
+                else:
+                    st.session_state.comentarios_parametro[clave] = ""
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.parametros_muestra = parametros
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 8 - CONTROL DE INOCUIDAD (MA-PL-019) - solo los controles que aplican a la actividad
+# ============================================================================
+elif st.session_state.step == 8:
+    st.header("7️⃣ Control de inocuidad")
+
+    fila = st.session_state.fila_actividad
+    n = st.session_state.n_muestras
+    criterios = st.session_state.get("inocuidad_actividad", {})
+    controles = [d for d in INOCUIDAD_DEFS if d[0] in criterios]
+
+    st.markdown(f"**Producto:** {st.session_state.producto} &nbsp;|&nbsp; "
+                f"**Actividad:** {fila['actividad']} — {fila['componente']}")
+
+    if "respuestas_inocuidad" not in st.session_state:
+        st.session_state.respuestas_inocuidad = {}
+    if "comentarios_inocuidad" not in st.session_state:
+        st.session_state.comentarios_inocuidad = {}
+
+    if not controles:
+        st.info("Según el plan de calidad (MA-PL-019), esta actividad **no tiene controles de "
+                "inocuidad aplicables**. Puedes continuar.")
+    else:
+        st.caption("Solo se muestran los controles que aplican a esta actividad. Los controles de "
+                   "lote se responden **una vez** (valen para todas las muestras); hermeticidad se "
+                   "responde **por muestra**. Si marcas 'No conforme' se habilitará la acción correctiva.")
+        tabs_in = st.tabs([f"🛡️ {tab}" for _, tab, _, _, _ in controles])
+        for (clave, tab_label, _, plantilla_preg, nivel), tab in zip(controles, tabs_in):
+            criterio = criterios[clave]
+            pregunta = plantilla_preg.format(
+                criterio=criterio, proceso=nombre_proceso_termico(criterio)
+            )
+            with tab:
+                st.markdown(f"**{pregunta}**")
+                hay_nc = False
+                indices = range(n) if nivel == "muestra" else [None]
+                for i in indices:
+                    key = f"inocu_{clave}" if i is None else f"inocu_{clave}_{i}"
+                    etiqueta = "Resultado del lote/actividad" if i is None else f"Muestra {i + 1}"
+                    actual = st.session_state.respuestas_inocuidad.get(key, "Conforme")
+                    st.session_state.respuestas_inocuidad[key] = st.radio(
+                        etiqueta, ["Conforme", "No conforme"],
+                        index=0 if actual == "Conforme" else 1,
+                        horizontal=True, key=f"widget_{key}",
+                    )
+                    if st.session_state.respuestas_inocuidad[key] == "No conforme":
+                        hay_nc = True
+                if hay_nc:
+                    st.session_state.comentarios_inocuidad[clave] = st.text_area(
+                        f"Acción correctiva / comentario para '{tab_label}'",
+                        value=st.session_state.comentarios_inocuidad.get(clave, ""),
+                        key=f"comentario_inocu_{clave}",
+                    )
+                else:
+                    st.session_state.comentarios_inocuidad[clave] = ""
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.controles_inocuidad = [d[0] for d in controles]
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 9 - CONCLUSIÓN DEL REGISTRO
+# ============================================================================
+elif st.session_state.step == 9:
+    st.header("8️⃣ Conclusión del registro")
+
+    nc_in = [d[1] for d in INOCUIDAD_DEFS
+             if d[0] in st.session_state.get("controles_inocuidad", [])
+             and any(v == "No conforme" for k, v in st.session_state.respuestas_inocuidad.items()
+                     if k == f"inocu_{d[0]}" or k.startswith(f"inocu_{d[0]}_"))]
+    if nc_in:
+        st.warning("⚠️ Hay controles de inocuidad **No conforme**: " + ", ".join(nc_in)
+                   + ". Considéralo al concluir el registro.")
+
+    conclusion = st.radio(
+        "Conclusión",
+        ["Conforme", "No conforme"],
+        index=0 if st.session_state.get("conclusion", "Conforme") == "Conforme" else 1,
+        horizontal=True,
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Generar resumen ➜", type="primary"):
+            st.session_state.conclusion = conclusion
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 10 - RESUMEN FINAL Y EXPORTACIÓN
+# ============================================================================
+elif st.session_state.step == 10:
+    st.header("9️⃣ Resumen final")
+
+    fila = st.session_state.fila_actividad
+    n = st.session_state.n_muestras
+    parametros = st.session_state.parametros_muestra
+    claves_activas = [clave for clave, _, _ in parametros]
+
+    st.subheader("Datos del registro")
+    resumen_info = pd.DataFrame(
+        {
+            "Campo": [
+                "Equipo de calidad", "Turno", "Fecha de producción", "Cliente", "Área",
+                "Línea HACCP", "Producto", "Componente", "Actividad",
+                "¿Aplica batch?", "Tamaño de batch", "Letra código muestreo",
+                "N° de muestras", "Balanza utilizada", "Termómetro utilizado", "Conclusión",
+            ],
+            "Valor": [
+                st.session_state.responsable, st.session_state.turno,
+                st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
+                CLIENTE_FIJO, AREA_FIJA,
+                st.session_state.linea_haccp, st.session_state.producto,
+                fila["componente"], fila["actividad"],
+                st.session_state.aplica_batch,
+                st.session_state.batch_size if st.session_state.batch_size else "No aplica",
+                st.session_state.letra_codigo if st.session_state.letra_codigo else "No aplica",
+                n, st.session_state.balanza_sel, st.session_state.termometro_sel,
+                st.session_state.conclusion,
+            ],
+        }
+    )
+    st.dataframe(resumen_info, use_container_width=True, hide_index=True)
+
+    if parametros:
+        st.subheader("Resultados por parámetro (muestras)")
+        conteo = {}
+        for clave, label, _ in parametros:
+            valores = [st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)]
+            conteo[label] = {
+                "Conforme": valores.count("Conforme"),
+                "No conforme": valores.count("No conforme"),
+            }
+        st.dataframe(pd.DataFrame(conteo).T, use_container_width=True)
+
+    controles_activos = st.session_state.get("controles_inocuidad", [])
+    if controles_activos:
+        st.subheader("Control de inocuidad")
+        filas_in = []
+        for clave, tab_label, _, _, nivel in INOCUIDAD_DEFS:
+            if clave not in controles_activos:
+                continue
+            vals = [st.session_state.respuestas_inocuidad.get(
+                        f"inocu_{clave}" if nivel == "lote" else f"inocu_{clave}_{i}", "Conforme")
+                    for i in (range(n) if nivel == "muestra" else [None])] if nivel == "muestra" else \
+                   [st.session_state.respuestas_inocuidad.get(f"inocu_{clave}", "Conforme")]
+            filas_in.append({"Control": tab_label, "Nivel": "Por muestra" if nivel == "muestra" else "Lote",
+                             "Conforme": vals.count("Conforme"), "No conforme": vals.count("No conforme")})
+        st.dataframe(pd.DataFrame(filas_in), use_container_width=True, hide_index=True)
+
+    # ------------------------------------------------------------------
+    # Armado de las filas exportables (UNA fila por muestra, igual que PT)
+    # ------------------------------------------------------------------
+    valores_por_parametro = {
+        clave: [st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)]
+        for clave in claves_activas
+    }
+
+    def valor_muestra(clave, i):
+        if clave not in valores_por_parametro:
+            return "No aplica"
+        valor = valores_por_parametro[clave][i]
+        if valor == "No conforme":
+            comentario = st.session_state.comentarios_parametro.get(clave, "").strip()
+            if comentario:
+                return f"No conforme: {comentario}"
+        return valor
+
+    def valor_inocuidad(clave, nivel, i):
+        if clave not in controles_activos:
+            return "No aplica"
+        key = f"inocu_{clave}" if nivel == "lote" else f"inocu_{clave}_{i}"
+        valor = st.session_state.respuestas_inocuidad.get(key, "Conforme")
+        if valor == "No conforme":
+            accion = st.session_state.comentarios_inocuidad.get(clave, "").strip()
+            if accion:
+                return f"No conforme: {accion}"
+        return valor
+
+    filas_export = []
+    for i in range(n):
+        filas_export.append([
+            st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
+            AREA_FIJA,
+            CLIENTE_FIJO,
+            i + 1,
+            st.session_state.linea_haccp,
+            st.session_state.producto,
+            fila["componente"],
+            fila["actividad"],
+        ] + [
+            valor_muestra(clave, i) for clave, _ in PARAMS_ANTES_INOCUIDAD
+        ] + [
+            valor_inocuidad(clave, nivel, i) for clave, _, _, _, nivel in INOCUIDAD_DEFS
+        ] + [
+            valor_muestra("observacion", i),
+        ] + [
+            st.session_state.balanza_sel,      # Código de Balanza
+            st.session_state.termometro_sel,   # Código de Termómetro
+        ] + [
+            st.session_state.conclusion,
+            iniciales(st.session_state.responsable),
+        ])
+
+    export_df = pd.DataFrame(filas_export, columns=HEADERS_EXPORT)
+
+    with st.expander("Ver todas las filas que se guardarán/exportarán"):
+        st.dataframe(export_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Guardar historial")
+    if st.button("💾 Guardar en Google Sheets (historial)", type="primary"):
+        combo_actual = (
+            st.session_state.producto.strip().upper(),
+            fila["componente"].strip().upper(),
+            fila["actividad"].strip().upper(),
+        )
+        actividades_actuales = obtener_actividades_registradas(
+            st.session_state.fecha_produccion
+        )
+        if combo_actual in actividades_actuales:
+            st.error(
+                f"⚠️ No se guardó: **{fila['actividad']} — {fila['componente']}** de "
+                f"**{st.session_state.producto}** ya tiene registro en algún turno de "
+                f"{st.session_state.fecha_produccion.strftime('%d/%m/%Y')}, probablemente hecho "
+                "por otro supervisor mientras completabas este formulario. Puedes descargar este "
+                "registro como respaldo (CSV/Excel abajo), pero no se duplicará en el historial."
+            )
+        else:
+            exito, mensaje = guardar_en_google_sheets(filas_export)
+            if exito:
+                st.success(mensaje)
+                st.session_state.actividades_registradas = actividades_actuales | {combo_actual}
+            else:
+                st.error(mensaje)
+
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Registro")
+    excel_buffer.seek(0)
+
+    st.divider()
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        st.download_button(
+            "⬇ Descargar CSV",
+            data=csv_bytes,
+            file_name=f"registro_PI_{st.session_state.producto}_{st.session_state.fecha_produccion}.csv",
+            mime="text/csv",
+        )
+    with col3:
+        st.download_button(
+            "⬇ Descargar Excel",
+            data=excel_buffer,
+            file_name=f"registro_PI_{st.session_state.producto}_{st.session_state.fecha_produccion}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    st.divider()
+    if st.button("🔄 Nuevo registro"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
