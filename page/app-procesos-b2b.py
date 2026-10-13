@@ -37,11 +37,6 @@ except ImportError:
 # ----------------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
 # ----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="Registro de Calidad - Producto Intermedio B2B Starbucks",
-    page_icon="🧪",
-    layout="wide",
-)
 
 EXCEL_PATH = "MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx"  # mismo nivel que este .py
 SHEET_NAME = "PROCESO-B2B-STB"
