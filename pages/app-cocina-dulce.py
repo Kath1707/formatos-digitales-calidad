@@ -709,9 +709,9 @@ elif st.session_state.step == 9:
                 st.session_state.conclusion,
             ],
         }
-    )
+           )
+    resumen_info["Valor"] = resumen_info["Valor"].astype(str)
     st.dataframe(resumen_info, use_container_width=True, hide_index=True)
-
     st.subheader("Resultados por parámetro (muestras)")
     conteo = {}
     for clave, label, _ in parametros:
