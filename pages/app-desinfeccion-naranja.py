@@ -12,7 +12,7 @@ siguiendo el mismo patrón que la app de Desinfección de Huevo:
 Columnas del registro (en este orden):
 FECHA | LÍNEA | PRODUCTO | LAVADO | DESINFECCIÓN [ ] ppm | TIEMPO (min) |
 ACCIÓN CORRECTIVA | EJECUTOR | SUPERVISOR CALIDAD | PRODUCTO STBX A TRABAJAR |
-VºBº JEFE DE CALIDAD
+VºBº COORDINADORA DE CALIDAD
 
 Cada registro nuevo se INSERTA (nunca se sobrescribe) justo encima de la fila
 donde está la imagen de la firma del Jefe de Calidad, para no pisarla nunca.
@@ -29,7 +29,7 @@ from datetime import date
 CARPETA_NOMBRE = "Desinfeccion naranja"        # ⚠️ AJUSTA si el nombre exacto de tu carpeta en Drive es distinto
 HOJA_PLANTILLA = "Hoja 1"                       # nombre de la hoja plantilla dentro de cada spreadsheet mensual
 FILA_ENCABEZADO = 4                             # fila donde están los títulos de columna (A4:K4)
-MARCADOR_FIRMA = "JEFE DE CALIDAD"              # texto de la leyenda que está justo DEBAJO de la imagen de firma
+MARCADOR_FIRMA = "COORDINADORA DE CALIDAD"              # texto de la leyenda que está justo DEBAJO de la imagen de firma
                                                  # (la imagen de la firma ocupa la fila inmediatamente anterior a este texto; no tocar)
 
 # Valores fijos del registro (se muestran como recordatorio y se guardan tal cual en cada fila).
@@ -37,7 +37,7 @@ MARCADOR_FIRMA = "JEFE DE CALIDAD"              # texto de la leyenda que está 
 CAMPOS_FIJOS = {
     "LÍNEA": "PROCESOS",
     "PRODUCTO": "Naranja",
-    "VºBº JEFE DE CALIDAD": "V. IRIARTE",
+    "VºBº COORDINADORA DE CALIDAD": "V. IRIARTE",
 }
 
 OPCIONES_MINUTOS = ["3 minutos", "4 minutos", "5 minutos", "> 5 minutos"]
@@ -131,7 +131,7 @@ def obtener_o_crear_hoja_del_dia(spreadsheet, fecha: date):
 def encontrar_fila_firma(worksheet):
     """
     Ubica la fila de la IMAGEN de firma: es la fila inmediatamente anterior a la
-    leyenda "VºB JEFE DE CALIDAD" (MARCADOR_FIRMA), buscando solo debajo del
+    leyenda "VºB COORDINADORA DE CALIDAD" (MARCADOR_FIRMA), buscando solo debajo del
     encabezado para no confundirla con la columna del encabezado (fila 4).
 
     Insertar SIEMPRE una fila nueva justo en esta posición (en vez de sobrescribir
@@ -165,7 +165,7 @@ def guardar_registro(
         ejecutor,
         supervisor_calidad,
         producto_stbx,
-        CAMPOS_FIJOS["VºBº JEFE DE CALIDAD"],
+        CAMPOS_FIJOS["VºBº COORDINADORA DE CALIDAD"],
     ]
     # Siempre se INSERTA (nunca se sobrescribe) justo encima de la fila de la firma,
     # empujando la imagen y la leyenda un lugar hacia abajo en cada registro.
@@ -175,6 +175,7 @@ def guardar_registro(
 # ──────────────────────────────────────────────────────────────────────────
 # INTERFAZ STREAMLIT
 # ──────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Control Desinfección Naranja", page_icon="🍊", layout="centered")
 
 st.title("🍊 Control de Desinfección de Naranja")
 st.caption("MA-FR-033 · Control de procesos · María Almenara")
@@ -185,7 +186,7 @@ with st.expander("ℹ️ Recordatorio del proceso", expanded=True):
         - **Línea:** {CAMPOS_FIJOS['LÍNEA']}
         - **Producto:** {CAMPOS_FIJOS['PRODUCTO']}
         - **Solución:** hipoclorito de sodio
-        - **Concentración mínima:** > 200 ppm — **tiempo mínimo:** 3 min
+        - **Concentración mínima:** > 200 ppm — **tiempo mínimo:** 5 min
         - Si la concentración es inferior al LC: preparar nuevamente la solución y desinfectar de nuevo.
         - Si el tiempo fue inferior al LC: enjuagar y desinfectar nuevamente.
         """
@@ -215,9 +216,9 @@ else:
         "Comentario de acción correctiva", placeholder="Escribe el comentario...", key=f"accion_{k}"
     )
 
-ejecutor = st.text_input("Ejecutor", placeholder="Nombre completo", key=f"ejecutor_{k}")
+ejecutor = st.text_input("Ejecutor (Supervisor de Calidad)", placeholder="Nombre completo", key=f"ejecutor_{k}")
 supervisor_calidad = st.text_input(
-    "Personal Calidad que registró", placeholder="Nombre completo", key=f"supervisor_calidad_{k}"
+    "Supervisor Calidad que registró", placeholder="Nombre completo", key=f"supervisor_calidad_{k}"
 )
 producto_stbx = st.text_input(
     "Producto a trabajar", placeholder="Producto para el que se usarán estas naranjas", key=f"producto_stbx_{k}"
