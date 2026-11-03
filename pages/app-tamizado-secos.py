@@ -38,10 +38,12 @@ MARCADOR_FIRMA = "COORDINADORA DE CALIDAD"      # leyenda ubicada justo DEBAJO d
 
 # Valores fijos del registro (se muestran como recordatorio y se guardan en cada fila).
 CAMPOS_FIJOS = {
-    "LÍNEA": "PROCESOS",
     "#TAMAÑO TAMIZ": "N° 30",
     "VºBº COORDINADORA DE CALIDAD": "V. IRIARTE",
 }
+
+# Líneas donde se supervisa el tamizado (edita esta lista si cambian)
+OPCIONES_LINEA = ["Batido", "Amasados", "Panadería", "Muffin", "Galletón", "Cheesecake"]
 
 # Insumos secos que se pueden elegir (edita esta lista). "Otro" permite escribir uno distinto.
 OPCIONES_INSUMO = ["Harina", "Azúcar", "Polvos", "Otro"]
@@ -147,13 +149,13 @@ def encontrar_fila_firma(worksheet):
 
 
 def guardar_registro(
-    worksheet, fecha, producto, tamizado, accion_correctiva,
+    worksheet, fecha, linea, producto, tamizado, accion_correctiva,
     ejecutor, miembro_calidad, producto_a_trabajar,
 ):
     fila_firma = encontrar_fila_firma(worksheet)
     nueva_fila = [
         fecha.strftime("%d/%m/%Y"),
-        CAMPOS_FIJOS["LÍNEA"],
+        linea,
         producto,
         tamizado,
         CAMPOS_FIJOS["#TAMAÑO TAMIZ"],
@@ -189,15 +191,12 @@ def guardar_registro(
 # ──────────────────────────────────────────────────────────────────────────
 # INTERFAZ STREAMLIT
 # ──────────────────────────────────────────────────────────────────────────
-
-
 st.title("🥣 Control de Tamizado de Insumos Secos")
 st.caption("Control de procesos · María Almenara")
 
 with st.expander("ℹ️ Recordatorio del proceso", expanded=True):
     st.markdown(
         f"""
-        - **Línea:** {CAMPOS_FIJOS['LÍNEA']}
         - **Colador:** {CAMPOS_FIJOS['#TAMAÑO TAMIZ']} (abertura aprox. 0.6 mm)
         - **Frecuencia:** por cada lote o cantidad de insumo seco que se tamice, antes de su uso en el proceso.
         - Si se encuentran materias extrañas en el colador: retirarlas, registrar el hallazgo y volver a tamizar el insumo.
@@ -215,6 +214,8 @@ if "form_key" not in st.session_state:
 k = st.session_state.form_key  # sufijo de las keys, cambia al pulsar "Nuevo registro"
 
 fecha_seleccionada = st.date_input("Fecha", value=date.today(), format="DD/MM/YYYY", key=f"fecha_{k}")
+
+linea = st.selectbox("Línea", options=OPCIONES_LINEA, key=f"linea_{k}")
 
 insumo_elegido = st.selectbox("Producto (insumo seco tamizado)", options=OPCIONES_INSUMO, key=f"insumo_{k}")
 if insumo_elegido == OPCION_OTRO:
@@ -268,14 +269,14 @@ with col_guardar:
                     spreadsheet = obtener_spreadsheet_mensual(gc, carpeta_id, nombre_ss)
                     worksheet = obtener_o_crear_hoja_del_dia(spreadsheet, fecha_seleccionada)
                     guardar_registro(
-                        worksheet, fecha_seleccionada, producto.strip(), tamizado, accion_final,
+                        worksheet, fecha_seleccionada, linea, producto.strip(), tamizado, accion_final,
                         ejecutor.strip(), miembro_calidad.strip(), producto_a_trabajar.strip(),
                     )
                 st.success(
                     f"✅ Registro guardado correctamente en '{nombre_ss}' → "
                     f"hoja '{fecha_seleccionada.strftime('%Y-%m-%d')}'."
                 )
-               
+              
             except FileNotFoundError as e:
                 st.error(str(e))
             except Exception as e:
