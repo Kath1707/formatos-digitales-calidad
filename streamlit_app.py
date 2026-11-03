@@ -194,6 +194,26 @@ with col2:
     if st.button("Abrir →", key="btn_naranja"):
         st.switch_page("pages/app-desinfeccion-naranja.py")
 
+# ── Módulos de control de procesos ─────────────────────────────────────────
+st.markdown('<p class="seccion-label">Control de procesos</p>', unsafe_allow_html=True)
+
+# Módulo 6 — Tamizado de Insumos Secos
+col1, col2 = st.columns([3, 1], vertical_alignment="center")
+with col1:
+    st.markdown(
+        """
+        <div class="modulo-card">
+            <div class="modulo-icon">🥣</div>
+            <p class="modulo-titulo">Tamizado de Insumos Secos</p>
+            <p class="modulo-desc">Control de tamizado con colador N° 30 por lote</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with col2:
+    if st.button("Abrir →", key="btn_tamizado"):
+        st.switch_page("pages/app-tamizado-secos.py")
+
 # ── Pie ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.caption("MA · Sistema Digital de Calidad · v1.0")
