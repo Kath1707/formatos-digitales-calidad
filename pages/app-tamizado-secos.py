@@ -275,7 +275,7 @@ with col_guardar:
                     f"✅ Registro guardado correctamente en '{nombre_ss}' → "
                     f"hoja '{fecha_seleccionada.strftime('%Y-%m-%d')}'."
                 )
-                st.balloons()
+               
             except FileNotFoundError as e:
                 st.error(str(e))
             except Exception as e:
