@@ -189,7 +189,7 @@ def guardar_registro(
 # ──────────────────────────────────────────────────────────────────────────
 # INTERFAZ STREAMLIT
 # ──────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Control Tamizado Secos", page_icon="🥣", layout="centered")
+
 
 st.title("🥣 Control de Tamizado de Insumos Secos")
 st.caption("Control de procesos · María Almenara")
