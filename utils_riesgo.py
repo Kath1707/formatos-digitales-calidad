@@ -121,13 +121,40 @@ def _periodo_index(anio: int, mes: int) -> int:
 
 def cargar_reclamos_df(gc) -> pd.DataFrame:
     """Lee la hoja 'Reclamos' completa y devuelve un DataFrame con una columna extra
-    'productos_app' (lista de productos canónicos a los que aplica cada fila)."""
+    'productos_app' (lista de productos canónicos a los que aplica cada fila).
+
+    No usa ws.get_all_records() directamente: el Excel original tiene un título y
+    un subtítulo en las filas 1-2 antes del encabezado real (fila 4), y
+    get_all_records() por defecto asume que la fila 1 es el encabezado — con una
+    sola celda de título ahí, gspread revienta por encabezados vacíos/duplicados.
+    En su lugar, se busca la fila de encabezado real buscando "Producto" y "Tipo
+    de Hallazgo" (robusto a que alguien inserte/borre filas arriba después)."""
     sh = gc.open_by_key(RECLAMOS_SHEET_ID)
     ws = sh.worksheet(RECLAMOS_WORKSHEET)
-    registros = ws.get_all_records()
-    df = pd.DataFrame(registros)
-    if df.empty:
-        return df
+    valores = ws.get_all_values()
+    if not valores:
+        return pd.DataFrame()
+
+    fila_header_idx = next(
+        (i for i, fila in enumerate(valores)
+         if "Producto" in fila and "Tipo de Hallazgo" in fila),
+        None,
+    )
+    if fila_header_idx is None:
+        raise RuntimeError(
+            "No encontré la fila de encabezado ('Producto', 'Tipo de Hallazgo') en la "
+            "hoja 'Reclamos' del Sheet de reclamos. ¿Se movió o renombró alguna columna?"
+        )
+
+    encabezado = valores[fila_header_idx]
+    filas_datos = [f for f in valores[fila_header_idx + 1:] if any(c.strip() for c in f)]
+    df = pd.DataFrame(filas_datos, columns=encabezado)
+    # columnas sin nombre (celdas vacías a la derecha del encabezado) se descartan
+    df = df.loc[:, [c != "" for c in df.columns]]
+    if df.empty or "Producto" not in df.columns:
+        return pd.DataFrame()
+
+    df["Año"] = pd.to_numeric(df.get("Año"), errors="coerce")
     df["productos_app"] = df["Producto"].apply(productos_de)
     df["_periodo"] = df.apply(
         lambda r: _primer_mes_anio(r.get("Mes", ""), r.get("Año", 0)), axis=1
