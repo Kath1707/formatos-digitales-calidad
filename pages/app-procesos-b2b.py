@@ -34,6 +34,8 @@ try:
 except ImportError:
     GSHEETS_DISPONIBLE = False
 
+import utils_riesgo as ur
+
 # ----------------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
 # ----------------------------------------------------------------------------
@@ -509,6 +511,46 @@ def get_sample_size(lot_size: int):
 
 
 # ----------------------------------------------------------------------------
+# MUESTREO ADAPTATIVO — extensión de la Tabla S-2 impulsada por el histórico de
+# reclamos (ver utils_riesgo.py). La tabla S-2 YA es "Inspección Rigurosa" (el
+# nivel más estricto que define MIL-STD-105E para esta clasificación); la
+# extensión no inventa un nivel nuevo, sino que fuerza el tamaño de muestra que
+# el estándar exigiría para un LOTE MÁS GRANDE cuando el producto viene mostrando
+# reclamos recientes del cliente — un disparador adicional de "endurecer el
+# muestreo", igual en espíritu a las reglas de cambio normal→rigurosa del propio
+# estándar, pero basado en reclamos en vez de solo en resultados de muestreo interno.
+# ----------------------------------------------------------------------------
+SALTOS_POR_NIVEL_RIESGO = {"Normal": 0, "Alto": 1, "Crítico": 2}
+
+
+def get_sample_size_adaptativo(lot_size: int, nivel_riesgo: str):
+    """Devuelve (letra, n, Ac, Re, escalado). 'escalado' es True si el riesgo por
+    reclamos obligó a usar una fila más estricta que la que correspondería solo
+    por tamaño de lote."""
+    idx_base = len(SAMPLING_TABLE_S2) - 1
+    for idx, (low, high, _letter, _n, _ac, _re) in enumerate(SAMPLING_TABLE_S2):
+        if low <= lot_size <= high:
+            idx_base = idx
+            break
+
+    saltos = SALTOS_POR_NIVEL_RIESGO.get(nivel_riesgo, 0)
+    idx_final = min(idx_base + saltos, len(SAMPLING_TABLE_S2) - 1)
+    _, _, letra, n, ac, re_ = SAMPLING_TABLE_S2[idx_final]
+    return letra, n, ac, re_, (idx_final != idx_base)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _cargar_reclamos_cacheado(_gc) -> pd.DataFrame:
+    """Cache de 15 min: evita leer el Google Sheet de reclamos en cada rerun del
+    wizard. El guion bajo en `_gc` le dice a Streamlit que no intente hashear el
+    cliente de gspread."""
+    try:
+        return ur.cargar_reclamos_df(_gc)
+    except Exception:
+        return pd.DataFrame()
+
+
+# ----------------------------------------------------------------------------
 # CARGA Y LIMPIEZA DE DATOS DEL EXCEL
 # ----------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
@@ -879,6 +921,34 @@ elif st.session_state.step == 3:
     )
     producto_sel = st.selectbox("Producto", productos_linea)
 
+    # ── Banner de riesgo en tiempo real (histórico de reclamos B2B/STBX) ────
+    gc_riesgo, _drive_riesgo = get_gsheet_client_and_drive()
+    nivel_riesgo_producto = "Normal"
+    if gc_riesgo is not None:
+        df_reclamos = _cargar_reclamos_cacheado(gc_riesgo)
+        riesgo = ur.calcular_riesgo_producto(
+            df_reclamos, producto_sel, fecha_ref=st.session_state.get("fecha_produccion")
+        )
+        nivel_riesgo_producto = riesgo["nivel"]
+        ventana = riesgo["ventana_meses"]
+        if riesgo["nivel"] == "Crítico":
+            st.error(
+                f"🔴 **Riesgo CRÍTICO** — {riesgo['n_reclamos']} reclamo(s) de **{producto_sel}** en "
+                f"los últimos {ventana} meses. Se exigirá un muestreo más riguroso en el siguiente paso."
+            )
+        elif riesgo["nivel"] == "Alto":
+            st.warning(
+                f"🟡 **Riesgo ALTO** — {riesgo['n_reclamos']} reclamo(s) de **{producto_sel}** en los "
+                f"últimos {ventana} meses. Se exigirá un muestreo más estricto en el siguiente paso."
+            )
+        else:
+            st.success(f"🟢 **Riesgo Normal** — sin reclamos recientes relevantes de **{producto_sel}**.")
+    else:
+        st.caption(
+            "ℹ️ No se pudo conectar al histórico de reclamos (banner de riesgo no disponible ahora "
+            "mismo); se usará el muestreo estándar sin ajuste adaptativo."
+        )
+
     col1, col2 = st.columns(2)
     with col1:
         st.button("⬅ Atrás", on_click=go_back)
@@ -886,6 +956,7 @@ elif st.session_state.step == 3:
         if st.button("Siguiente ➜", type="primary"):
             st.session_state.linea_haccp = linea_sel
             st.session_state.producto = producto_sel
+            st.session_state.nivel_riesgo_producto = nivel_riesgo_producto
             go_next()
             st.rerun()
 
@@ -983,7 +1054,14 @@ elif st.session_state.step == 5:
 
     if aplica_batch == "Sí":
         batch_size = st.number_input("¿Cuántas unidades tiene el batch?", min_value=1, step=1, value=300)
-        letra, n_muestras, ac, re_ = get_sample_size(int(batch_size))
+        nivel_riesgo = st.session_state.get("nivel_riesgo_producto", "Normal")
+        letra, n_muestras, ac, re_, escalado = get_sample_size_adaptativo(int(batch_size), nivel_riesgo)
+        if escalado:
+            st.warning(
+                f"⚠️ **Muestreo adaptativo activado** (riesgo *{nivel_riesgo}* de **{st.session_state.producto}** "
+                f"por reclamos recientes): se exige el tamaño de muestra de la letra código **{letra}**, "
+                f"más estricto que el mínimo del estándar para este tamaño de lote."
+            )
         st.success(
             f"Para un batch de **{int(batch_size)}** unidades: letra código **{letra}** → "
             f"**n = {n_muestras}** muestras. Criterio: Aceptar con **{ac}** o menos no conformes, "
@@ -1267,7 +1345,8 @@ elif st.session_state.step == 10:
                 "Equipo de calidad", "Turno", "Fecha de producción", "Cliente", "Área",
                 "Línea HACCP", "Producto", "Componente", "Actividad",
                 "¿Aplica batch?", "Tamaño de batch", "Letra código muestreo",
-                "N° de muestras", "Balanza utilizada", "Termómetro utilizado", "Conclusión",
+                "N° de muestras", "Nivel de riesgo (reclamos)", "Balanza utilizada",
+                "Termómetro utilizado", "Conclusión",
             ],
             "Valor": [
                 st.session_state.responsable, st.session_state.turno,
@@ -1278,7 +1357,8 @@ elif st.session_state.step == 10:
                 st.session_state.aplica_batch,
                 st.session_state.batch_size if st.session_state.batch_size else "No aplica",
                 st.session_state.letra_codigo if st.session_state.letra_codigo else "No aplica",
-                n, st.session_state.balanza_sel, st.session_state.termometro_sel,
+                n, st.session_state.get("nivel_riesgo_producto", "Normal"),
+                st.session_state.balanza_sel, st.session_state.termometro_sel,
                 st.session_state.conclusion,
             ],
         }

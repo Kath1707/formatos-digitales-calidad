@@ -214,6 +214,26 @@ with col2:
     if st.button("Abrir →", key="btn_tamizado"):
         st.switch_page("pages/app-tamizado-secos.py")
 
+# ── Módulos de análisis y riesgo ────────────────────────────────────────────
+st.markdown('<p class="seccion-label">Análisis y riesgo</p>', unsafe_allow_html=True)
+
+# Módulo 7 — Matriz de Riesgo FMEA
+col1, col2 = st.columns([3, 1], vertical_alignment="center")
+with col1:
+    st.markdown(
+        """
+        <div class="modulo-card">
+            <div class="modulo-icon">⚠️</div>
+            <p class="modulo-titulo">Matriz de Riesgo FMEA (B2B STBX)</p>
+            <p class="modulo-desc">Severidad × Frecuencia por reclamos — dashboard de solo lectura</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with col2:
+    if st.button("Abrir →", key="btn_fmea"):
+        st.switch_page("pages/app-matriz-riesgo.py")
+
 # ── Pie ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.caption("MA · Sistema Digital de Calidad · v1.0")
