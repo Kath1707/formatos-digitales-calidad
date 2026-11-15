@@ -29,6 +29,59 @@ import utils_riesgo as ur
 st.set_page_config(page_title="Matriz FMEA · María Almenara", page_icon="⚠️", layout="wide")
 
 st.title("⚠️ Matriz de Riesgo FMEA — Línea B2B Starbucks")
+
+with st.expander("ℹ️ ¿Qué es esta página y cómo se usa? (leer antes de la primera vez)", expanded=True):
+    st.markdown(
+        """
+**¿Qué es?**
+Un análisis de riesgo de la línea B2B/Starbucks basado en el histórico de reclamos de clientes.
+En vez de reaccionar reclamo por reclamo, agrupa todos los reclamos por producto y tipo de hallazgo,
+y calcula qué combinaciones representan el riesgo más alto para la calidad del producto.
+
+**¿Cómo funciona? (resumen)**
+1. Cada reclamo se agrupa por **Producto** y **Tipo de Hallazgo** (ej. "Galleta Chip Chocolate" + "Material extraño").
+2. A cada tipo de hallazgo se le asigna una **Severidad** fija (1 a 5) según qué tan grave es para la
+   inocuidad/calidad del producto (ej. contaminación = 5, un tema de etiquetado = 3).
+3. Se calcula la **Frecuencia** (1 a 5) de cada combinación, según cuántas veces se repitió frente a las demás.
+4. Se multiplican: **Severidad × Frecuencia = NPR** (Número Prioritario de Riesgo). A mayor NPR,
+   mayor prioridad debería tener esa combinación para una acción correctiva o preventiva.
+
+**¿Para qué le sirve al equipo de Calidad?**
+- Ayuda a decidir **en qué enfocar primero** los esfuerzos de mejora, en vez de guiarse solo por el
+  reclamo más reciente o más "ruidoso".
+- Da una base objetiva y con datos para discutir el riesgo en reuniones de calidad, y sirve como
+  evidencia de un **análisis de riesgos sistemático** ante auditoría FSSC 22000.
+- No reemplaza el criterio del equipo: es un punto de partida para investigar causa raíz en las
+  combinaciones de mayor NPR.
+- **No es de uso diario** — está pensada para revisarse periódicamente (reuniones de calidad, antes
+  de auditorías), no para abrirla cada mañana. El control del día a día está en el formulario de
+  registro (el banner de riesgo que aparece al seleccionar un producto).
+"""
+    )
+
+with st.expander("📖 Glosario de términos"):
+    st.markdown(
+        """
+- **FMEA (Failure Mode and Effects Analysis / Análisis de Modos de Falla y sus Efectos):**
+  metodología de ingeniería de calidad que evalúa cada forma en que un proceso o producto puede
+  fallar, y prioriza cuáles merecen atención según su gravedad y frecuencia.
+- **NPR (Número Prioritario de Riesgo):** resultado de Severidad × Frecuencia. A mayor NPR, mayor
+  prioridad.
+- **Severidad:** qué tan grave es un tipo de hallazgo si ocurre (escala 1-5, fija por tipo: p. ej.
+  contaminación es más grave que un tema de etiquetado).
+- **Frecuencia:** qué tan seguido se repite una combinación Producto × Tipo de Hallazgo, en una
+  escala de 1 a 5 relativa a las demás combinaciones (no es el conteo directo de reclamos, sino ese
+  conteo reescalado para poder compararlo).
+- **Tipo de Hallazgo:** la categoría del problema reportado por el cliente (ej. Contaminación,
+  Material extraño, Etiquetado, Calidad/apariencia, Otro).
+- **Combinación Producto × Hallazgo:** cada fila de la matriz; agrupa todos los reclamos de un mismo
+  producto con el mismo tipo de hallazgo.
+- **Reclamos sin producto mapeado:** reclamos cuyo nombre de producto no se pudo relacionar con
+  ninguno de los productos del catálogo actual (nombres genéricos o ambiguos); no afectan el cálculo
+  de riesgo de ningún producto puntual.
+"""
+    )
+
 st.caption(
     "Severidad × Frecuencia = NPR (Número Prioritario de Riesgo), calculado sobre el histórico "
     "completo de reclamos B2B/STBX. Dashboard de solo lectura — no registra nada."
