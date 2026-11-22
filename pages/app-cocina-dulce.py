@@ -24,6 +24,9 @@ from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
 
+import onedrive_client as od   # guardado en OneDrive (Excel); se activa con BACKEND en los Secrets
+import registro_excel as rx
+
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -334,7 +337,21 @@ def get_or_create_daily_worksheet(spreadsheet, fecha: date, turno: str):
     return ws
 
 
+def _guardar_en_onedrive(filas: list) -> tuple:
+    """Guarda las filas en la hoja día+turno del Excel del mes (carpeta 'Insumos cocina' de OneDrive)."""
+    try:
+        fecha = st.session_state.fecha_elaboracion
+        turno = st.session_state.turno
+        titulo = f"{fecha.strftime('%Y-%m-%d')} {turno}"
+        rx.guardar_filas(rx.COCINA, fecha, titulo, filas)
+        return True, f"Guardado en '{nombre_mes_es(fecha)}' → hoja '{titulo}'."
+    except Exception as e:
+        return False, f"Error al guardar en OneDrive: {e}"
+
+
 def guardar_en_google_sheets(filas: list) -> tuple:
+    if od.activo("cocina"):
+        return _guardar_en_onedrive(filas)
     gc, drive = get_gsheet_client_and_drive()
     if gc is None or drive is None:
         return False, "No se pudo conectar a Google Drive/Sheets (revisa los Secrets configurados)."
@@ -788,7 +805,10 @@ elif st.session_state.step == 9:
 
     st.divider()
     st.subheader("Guardar historial")
-    if st.button("💾 Guardar en Google Sheets (historial)", type="primary"):
+    if st.button(
+        "💾 Guardar en OneDrive (historial)" if od.activo("cocina") else "💾 Guardar en Google Sheets (historial)",
+        type="primary",
+    ):
         exito, mensaje = guardar_en_google_sheets(filas_export)
         if exito:
             st.success(mensaje)

@@ -26,6 +26,9 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+import onedrive_client as od   # guardado en OneDrive (Excel); se activa con BACKEND en los Secrets
+import registro_excel as rx
+
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -727,9 +730,13 @@ def get_or_create_daily_worksheet(spreadsheet, fecha: date, turno: str):
 
 
 def _leer_combinaciones_de_hoja(ws) -> set:
-    """Lee de una worksheet ya abierta qué combinaciones Producto+Componente+Actividad
+    """Lee de una worksheet (gspread) qué combinaciones Producto+Componente+Actividad
     tiene registradas. Devuelve un conjunto vacío si no hay datos o falta el encabezado."""
-    valores = ws.get_all_values()
+    return _combinaciones_de_valores(ws.get_all_values())
+
+
+def _combinaciones_de_valores(valores: list) -> set:
+    """Igual, a partir de los valores (lista de filas de texto) de una hoja."""
     if len(valores) < FILA_ENCABEZADO_PLANTILLA:
         return set()
 
@@ -761,13 +768,49 @@ def _leer_combinaciones_de_hoja(ws) -> set:
     return combinaciones
 
 
-def obtener_actividades_registradas(fecha: date, turno: str = None) -> set:
+def _actividades_onedrive(fecha: date, fresco: bool = False) -> set:
+    """Combinaciones ya registradas en CUALQUIER turno del día, leyendo el Excel de OneDrive."""
+    try:
+        titulos = [f"{fecha.strftime('%Y-%m-%d')} {t}" for t in TURNOS]
+        hojas = rx.leer_hojas_del_dia(rx.PI, fecha, titulos, fresco=fresco)
+        combinaciones = set()
+        for valores in hojas.values():
+            combinaciones |= _combinaciones_de_valores(valores)
+        return combinaciones
+    except Exception:
+        return set()  # ante cualquier error de lectura, no bloqueamos el flujo
+
+
+def _guardar_en_onedrive(filas: list) -> tuple:
+    """Guarda las filas en la hoja día+turno del Excel del mes (carpeta 'Productos intermedios')."""
+    try:
+        fecha = st.session_state.fecha_produccion
+        turno = st.session_state.turno
+        titulo = f"{fecha.strftime('%Y-%m-%d')} {turno}"
+        rx.guardar_filas(rx.PI, fecha, titulo, filas)
+        return True, f"Guardado en '{nombre_mes_es(fecha)}' → hoja '{titulo}'."
+    except Exception as e:
+        return False, f"Error al guardar en OneDrive: {e}"
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _cargar_reclamos_onedrive_cacheado() -> pd.DataFrame:
+    """Histórico de reclamos desde el Excel de OneDrive (carpeta 'Matriz'), cache de 15 min."""
+    try:
+        return ur.cargar_reclamos_df_onedrive()
+    except Exception:
+        return pd.DataFrame()
+
+
+def obtener_actividades_registradas(fecha: date, turno: str = None, fresco: bool = False) -> set:
     """Lee (sin crear nada) qué combinaciones Producto+Componente+Actividad ya
     tienen registro en CUALQUIER hoja (Día, Tarde, Madrugada) de esa fecha, para
     evitar que una misma actividad se registre dos veces en distintos turnos del
     mismo día. El parámetro 'turno' se mantiene solo por compatibilidad y ya no
     limita la búsqueda. Si el archivo del mes todavía no existe, devuelve un
     conjunto vacío."""
+    if od.activo("pi"):
+        return _actividades_onedrive(fecha, fresco=fresco)
     gc, drive = get_gsheet_client_and_drive()
     if gc is None or drive is None:
         return set()
@@ -802,6 +845,8 @@ def obtener_actividades_registradas(fecha: date, turno: str = None) -> set:
 
 def guardar_en_google_sheets(filas: list) -> tuple:
     """Guarda varias filas (una por muestra) en la hoja del día+turno correspondiente."""
+    if od.activo("pi"):
+        return _guardar_en_onedrive(filas)
     gc, drive = get_gsheet_client_and_drive()
     if gc is None or drive is None:
         return False, "No se pudo conectar a Google Drive/Sheets (revisa los Secrets configurados)."
@@ -922,10 +967,14 @@ elif st.session_state.step == 3:
     producto_sel = st.selectbox("Producto", productos_linea)
 
     # ── Banner de riesgo en tiempo real (histórico de reclamos B2B/STBX) ────
-    gc_riesgo, _drive_riesgo = get_gsheet_client_and_drive()
+    usar_reclamos_onedrive = od.activo("reclamos")
+    gc_riesgo, _drive_riesgo = (None, None) if usar_reclamos_onedrive else get_gsheet_client_and_drive()
     nivel_riesgo_producto = "Normal"
-    if gc_riesgo is not None:
-        df_reclamos = _cargar_reclamos_cacheado(gc_riesgo)
+    if usar_reclamos_onedrive or gc_riesgo is not None:
+        df_reclamos = (
+            _cargar_reclamos_onedrive_cacheado() if usar_reclamos_onedrive
+            else _cargar_reclamos_cacheado(gc_riesgo)
+        )
         riesgo = ur.calcular_riesgo_producto(
             df_reclamos, producto_sel, fecha_ref=st.session_state.get("fecha_produccion")
         )
@@ -1453,14 +1502,17 @@ elif st.session_state.step == 10:
 
     st.divider()
     st.subheader("Guardar historial")
-    if st.button("💾 Guardar en Google Sheets (historial)", type="primary"):
+    if st.button(
+        "💾 Guardar en OneDrive (historial)" if od.activo("pi") else "💾 Guardar en Google Sheets (historial)",
+        type="primary",
+    ):
         combo_actual = (
             st.session_state.producto.strip().upper(),
             fila["componente"].strip().upper(),
             fila["actividad"].strip().upper(),
         )
         actividades_actuales = obtener_actividades_registradas(
-            st.session_state.fecha_produccion
+            st.session_state.fecha_produccion, fresco=True
         )
         if combo_actual in actividades_actuales:
             st.error(

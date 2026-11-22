@@ -32,6 +32,9 @@ from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
 
+import onedrive_client as od   # guardado en OneDrive (Excel); se activa con BACKEND en los Secrets
+import registro_excel as rx
+
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -492,10 +495,39 @@ def _ajustar_filas_al_encabezado_real(ws, filas: list) -> list:
     return filas_ajustadas
 
 
-def obtener_productos_registrados_hoy(fecha: date) -> set:
+def _productos_hoy_onedrive(fecha: date, fresco: bool = False) -> set:
+    """Igual que obtener_productos_registrados_hoy pero leyendo el Excel de OneDrive."""
+    try:
+        titulo = fecha.strftime("%Y-%m-%d")
+        hojas = rx.leer_hojas_del_dia(rx.PT, fecha, [titulo], fresco=fresco)
+        if titulo not in hojas:
+            return set()  # aún no existe el libro/hoja del día -> nadie ha registrado nada
+        encabezado, filas = rx.filas_de_datos(hojas[titulo], rx.PT)
+        col = next((i for i, h in enumerate(encabezado) if h.strip().upper() == "PRODUCTO"), None)
+        if col is None:
+            return set()
+        return {f[col].strip().upper() for f in filas if len(f) > col and f[col].strip()}
+    except Exception:
+        return set()  # ante cualquier error de lectura, no bloqueamos el flujo
+
+
+def _guardar_en_onedrive(filas: list) -> tuple:
+    """Guarda las filas en la hoja del día del Excel del mes (carpeta 'Productos terminados')."""
+    try:
+        fecha_prod = st.session_state.fecha_produccion
+        titulo = fecha_prod.strftime("%Y-%m-%d")
+        rx.guardar_filas(rx.PT, fecha_prod, titulo, filas, ajustar_extras=True)
+        return True, f"Guardado en '{nombre_mes_es(fecha_prod)}' → hoja '{titulo}'."
+    except Exception as e:
+        return False, f"Error al guardar en OneDrive: {e}"
+
+
+def obtener_productos_registrados_hoy(fecha: date, fresco: bool = False) -> set:
     """Lee (sin crear nada) qué productos ya tienen registro en la hoja del día.
     Si el archivo del mes o la hoja del día todavía no existen, devuelve un
     conjunto vacío (nadie ha registrado nada todavía)."""
+    if od.activo("pt"):
+        return _productos_hoy_onedrive(fecha, fresco=fresco)
     gc, drive = get_gsheet_client_and_drive()
     if gc is None or drive is None:
         return set()
@@ -546,6 +578,8 @@ def obtener_productos_registrados_hoy(fecha: date) -> set:
 
 def guardar_en_google_sheets(filas: list) -> tuple:
     """Guarda las filas en la hoja del día correspondiente, dentro del Sheets del mes."""
+    if od.activo("pt"):
+        return _guardar_en_onedrive(filas)
     gc, drive = get_gsheet_client_and_drive()
     if gc is None or drive is None:
         return False, "No se pudo conectar a Google Drive/Sheets (revisa los Secrets configurados)."
@@ -1164,9 +1198,12 @@ elif st.session_state.step == 11:
     st.divider()
     st.subheader("Guardar historial")
 
-    if st.button("💾 Guardar en Google Sheets (historial)", type="primary"):
+    if st.button(
+        "💾 Guardar en OneDrive (historial)" if od.activo("pt") else "💾 Guardar en Google Sheets (historial)",
+        type="primary",
+    ):
         producto_actual = st.session_state.producto.strip().upper()
-        productos_hoy_actual = obtener_productos_registrados_hoy(st.session_state.fecha_produccion)
+        productos_hoy_actual = obtener_productos_registrados_hoy(st.session_state.fecha_produccion, fresco=True)
         if producto_actual in productos_hoy_actual:
             st.error(
                 f"⚠️ No se guardó: **{st.session_state.producto}** ya tiene un registro hoy "

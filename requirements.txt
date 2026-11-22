@@ -5,3 +5,6 @@ openpyxl>=3.1
 gspread>=6.0
 google-auth>=2.25
 google-api-python-client>=2.100
+msal>=1.28
+requests>=2.31
+pillow>=10.0

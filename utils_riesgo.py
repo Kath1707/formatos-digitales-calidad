@@ -29,8 +29,11 @@ except ImportError:
 # ----------------------------------------------------------------------------
 # CONFIGURACIÓN
 # ----------------------------------------------------------------------------
-RECLAMOS_SHEET_ID = "1ydr-6kbnqzspv0FEZL2BXXwdiRs4BQRz3w9lFC6KoaA"
+RECLAMOS_SHEET_ID = "1ydr-6kbnqzspv0FEZL2BXXwdiRs4BQRz3w9lFC6KoaA"   # Google Sheet (BACKEND = "google")
 RECLAMOS_WORKSHEET = "Reclamos"
+# Excel en OneDrive (BACKEND = "onedrive"): Calidad/Matriz/Consolidado_Reclamos_B2B_STBX.xlsx, hoja "Reclamos"
+RECLAMOS_ONEDRIVE_CARPETA = "Matriz"
+RECLAMOS_ONEDRIVE_ARCHIVO = "Consolidado_Reclamos_B2B_STBX.xlsx"
 
 # Severidad fija por tipo de hallazgo (1-5), propuesta ligada a criterio HACCP/FSSC
 # (Kath: ajusta si tu jefa o la documentación HACCP ya tienen su propia escala).
@@ -120,18 +123,33 @@ def _periodo_index(anio: int, mes: int) -> int:
 
 
 def cargar_reclamos_df(gc) -> pd.DataFrame:
-    """Lee la hoja 'Reclamos' completa y devuelve un DataFrame con una columna extra
-    'productos_app' (lista de productos canónicos a los que aplica cada fila).
-
-    No usa ws.get_all_records() directamente: el Excel original tiene un título y
-    un subtítulo en las filas 1-2 antes del encabezado real (fila 4), y
-    get_all_records() por defecto asume que la fila 1 es el encabezado — con una
-    sola celda de título ahí, gspread revienta por encabezados vacíos/duplicados.
-    En su lugar, se busca la fila de encabezado real buscando "Producto" y "Tipo
-    de Hallazgo" (robusto a que alguien inserte/borre filas arriba después)."""
+    """Lee la hoja 'Reclamos' del Google Sheet y devuelve un DataFrame con una columna
+    extra 'productos_app' (lista de productos canónicos a los que aplica cada fila)."""
     sh = gc.open_by_key(RECLAMOS_SHEET_ID)
     ws = sh.worksheet(RECLAMOS_WORKSHEET)
-    valores = ws.get_all_values()
+    return _df_desde_valores(ws.get_all_values())
+
+
+def cargar_reclamos_df_onedrive() -> pd.DataFrame:
+    """Igual que cargar_reclamos_df pero leyendo el Excel de OneDrive (carpeta 'Matriz')."""
+    import onedrive_client as od
+
+    hojas = od.leer_hojas(RECLAMOS_ONEDRIVE_CARPETA, RECLAMOS_ONEDRIVE_ARCHIVO, (RECLAMOS_WORKSHEET,))
+    if RECLAMOS_WORKSHEET not in hojas:
+        raise RuntimeError(
+            f"No encontré el archivo '{RECLAMOS_ONEDRIVE_ARCHIVO}' (hoja '{RECLAMOS_WORKSHEET}') en la "
+            f"carpeta '{RECLAMOS_ONEDRIVE_CARPETA}' de OneDrive."
+        )
+    return _df_desde_valores(hojas[RECLAMOS_WORKSHEET])
+
+
+def _df_desde_valores(valores: list) -> pd.DataFrame:
+    """DataFrame de reclamos a partir de los valores (lista de filas de texto) de la hoja.
+
+    No asume que la fila 1 es el encabezado: el Excel original tiene un título y un
+    subtítulo en las filas 1-2 antes del encabezado real (fila 4), así que se busca la
+    fila que contiene "Producto" y "Tipo de Hallazgo" (robusto a que alguien
+    inserte/borre filas arriba después)."""
     if not valores:
         return pd.DataFrame()
 
@@ -143,11 +161,15 @@ def cargar_reclamos_df(gc) -> pd.DataFrame:
     if fila_header_idx is None:
         raise RuntimeError(
             "No encontré la fila de encabezado ('Producto', 'Tipo de Hallazgo') en la "
-            "hoja 'Reclamos' del Sheet de reclamos. ¿Se movió o renombró alguna columna?"
+            "hoja 'Reclamos'. ¿Se movió o renombró alguna columna?"
         )
 
     encabezado = valores[fila_header_idx]
-    filas_datos = [f for f in valores[fila_header_idx + 1:] if any(c.strip() for c in f)]
+    n = len(encabezado)
+    filas_datos = [
+        (list(f) + [""] * n)[:n]  # filas de largo parejo (Excel puede devolver filas más cortas)
+        for f in valores[fila_header_idx + 1:] if any(c.strip() for c in f)
+    ]
     df = pd.DataFrame(filas_datos, columns=encabezado)
     # columnas sin nombre (celdas vacías a la derecha del encabezado) se descartan
     df = df.loc[:, [c != "" for c in df.columns]]
