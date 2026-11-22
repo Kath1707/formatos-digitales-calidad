@@ -24,6 +24,7 @@ try:
 except ImportError:
     GSHEETS_DISPONIBLE = False
 
+import onedrive_client as od   # lectura desde OneDrive; se activa con BACKEND / BACKEND_RECLAMOS en los Secrets
 import utils_riesgo as ur
 
 st.set_page_config(page_title="Matriz FMEA · María Almenara", page_icon="⚠️", layout="wide")
@@ -105,20 +106,36 @@ def _cargar(_gc):
     return ur.cargar_reclamos_df(_gc)
 
 
-gc = get_gsheet_client()
-if gc is None:
-    st.error(
-        "No se pudo conectar al Google Sheet de reclamos. Revisa que los Secrets "
-        "`[gcp_service_account]` estén configurados y que el Sheet esté compartido con esa cuenta "
-        "de servicio (botón Compartir → pegar el `client_email` de los Secrets → Lector)."
-    )
-    st.stop()
+@st.cache_data(ttl=900, show_spinner=False)
+def _cargar_onedrive():
+    return ur.cargar_reclamos_df_onedrive()
 
-with st.spinner("Cargando histórico de reclamos..."):
-    df_reclamos = _cargar(gc)
+
+if od.activo("reclamos"):
+    try:
+        with st.spinner("Cargando histórico de reclamos desde OneDrive..."):
+            df_reclamos = _cargar_onedrive()
+    except Exception as e:
+        st.error(
+            "No se pudo leer el Excel de reclamos en OneDrive "
+            f"(`{ur.RECLAMOS_ONEDRIVE_CARPETA}/{ur.RECLAMOS_ONEDRIVE_ARCHIVO}`): {e}"
+        )
+        st.stop()
+else:
+    gc = get_gsheet_client()
+    if gc is None:
+        st.error(
+            "No se pudo conectar al Google Sheet de reclamos. Revisa que los Secrets "
+            "`[gcp_service_account]` estén configurados y que el Sheet esté compartido con esa cuenta "
+            "de servicio (botón Compartir → pegar el `client_email` de los Secrets → Lector)."
+        )
+        st.stop()
+
+    with st.spinner("Cargando histórico de reclamos..."):
+        df_reclamos = _cargar(gc)
 
 if df_reclamos.empty:
-    st.warning("El Sheet de reclamos está vacío o no se pudo leer la hoja 'Reclamos'.")
+    st.warning("El archivo de reclamos está vacío o no se pudo leer la hoja 'Reclamos'.")
     st.stop()
 
 fmea = ur.calcular_fmea(df_reclamos)

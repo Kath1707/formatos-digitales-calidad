@@ -23,6 +23,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import date
 
+import onedrive_client as od   # guardado en OneDrive (Excel); se activa con BACKEND en los Secrets
+import registro_excel as rx
+
 # ──────────────────────────────────────────────────────────────────────────
 # CONFIGURACIÓN — AJUSTA ESTOS VALORES FIJOS SEGÚN CORRESPONDA
 # ──────────────────────────────────────────────────────────────────────────
@@ -149,12 +152,11 @@ def encontrar_fila_firma(worksheet):
     )
 
 
-def guardar_registro(
-    worksheet, fecha, lavado, ppm, minutos, accion_correctiva,
+def _armar_fila(
+    fecha, lavado, ppm, minutos, accion_correctiva,
     ejecutor, supervisor_calidad, producto_stbx,
 ):
-    fila_destino = encontrar_fila_firma(worksheet)
-    nueva_fila = [
+    return [
         fecha.strftime("%d/%m/%Y"),
         CAMPOS_FIJOS["LÍNEA"],
         CAMPOS_FIJOS["PRODUCTO"],
@@ -167,9 +169,37 @@ def guardar_registro(
         producto_stbx,
         CAMPOS_FIJOS["VºBº COORDINADORA DE CALIDAD"],
     ]
+
+
+def guardar_registro(
+    worksheet, fecha, lavado, ppm, minutos, accion_correctiva,
+    ejecutor, supervisor_calidad, producto_stbx,
+):
+    """Guardado en Google Sheets (BACKEND = "google", el valor por defecto)."""
+    fila_destino = encontrar_fila_firma(worksheet)
+    nueva_fila = _armar_fila(
+        fecha, lavado, ppm, minutos, accion_correctiva,
+        ejecutor, supervisor_calidad, producto_stbx,
+    )
     # Siempre se INSERTA (nunca se sobrescribe) justo encima de la fila de la firma,
     # empujando la imagen y la leyenda un lugar hacia abajo en cada registro.
     worksheet.insert_row(nueva_fila, index=fila_destino, value_input_option="USER_ENTERED")
+
+
+def guardar_registro_onedrive(
+    fecha, lavado, ppm, minutos, accion_correctiva,
+    ejecutor, supervisor_calidad, producto_stbx,
+):
+    """Guardado en el Excel del mes en OneDrive (BACKEND = "onedrive"). Devuelve el nombre del libro.
+    Llena primero la fila libre de la plantilla y luego inserta encima de la firma."""
+    fila = _armar_fila(
+        fecha, lavado, ppm, minutos, accion_correctiva,
+        ejecutor, supervisor_calidad, producto_stbx,
+    )
+    nombre_libro, _fila_usada = rx.guardar_fila_con_firma(
+        rx.HUEVO, fecha, fecha.strftime("%Y-%m-%d"), fila
+    )
+    return nombre_libro
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -240,17 +270,24 @@ with col_guardar:
         else:
             accion_final = accion_correctiva if dejar_sin_comentario else accion_correctiva.strip()
             try:
-                with st.spinner("Guardando en Google Sheets..."):
-                    gc = conectar_gspread()
-                    root_folder_id = st.secrets["ROOT_FOLDER_ID"]
-                    carpeta_id = obtener_carpeta_id(gc, CARPETA_NOMBRE, root_folder_id)
-                    nombre_ss = nombre_spreadsheet_mensual(fecha_seleccionada)
-                    spreadsheet = obtener_spreadsheet_mensual(gc, carpeta_id, nombre_ss)
-                    worksheet = obtener_o_crear_hoja_del_dia(spreadsheet, fecha_seleccionada)
-                    guardar_registro(
-                        worksheet, fecha_seleccionada, lavado, ppm, minutos, accion_final,
-                        ejecutor.strip(), supervisor_calidad.strip(), producto_stbx.strip(),
-                    )
+                if od.activo("huevo"):
+                    with st.spinner("Guardando en OneDrive..."):
+                        nombre_ss = guardar_registro_onedrive(
+                            fecha_seleccionada, lavado, ppm, minutos, accion_final,
+                            ejecutor.strip(), supervisor_calidad.strip(), producto_stbx.strip(),
+                        )
+                else:
+                    with st.spinner("Guardando en Google Sheets..."):
+                        gc = conectar_gspread()
+                        root_folder_id = st.secrets["ROOT_FOLDER_ID"]
+                        carpeta_id = obtener_carpeta_id(gc, CARPETA_NOMBRE, root_folder_id)
+                        nombre_ss = nombre_spreadsheet_mensual(fecha_seleccionada)
+                        spreadsheet = obtener_spreadsheet_mensual(gc, carpeta_id, nombre_ss)
+                        worksheet = obtener_o_crear_hoja_del_dia(spreadsheet, fecha_seleccionada)
+                        guardar_registro(
+                            worksheet, fecha_seleccionada, lavado, ppm, minutos, accion_final,
+                            ejecutor.strip(), supervisor_calidad.strip(), producto_stbx.strip(),
+                        )
                 st.session_state.guardado_ok = True
                 st.success(
                     f"✅ Registro guardado correctamente en '{nombre_ss}' → "
