@@ -1,7 +1,7 @@
 # Historial en OneDrive (Excel) — guía rápida
 
 Las apps pueden guardar el historial en Google Sheets (valor por defecto) o en archivos
-Excel de la carpeta **Calidad** del OneDrive de `khidalgo@mariaalmenara.pe`.
+Excel de la carpeta **Calidad** del OneDrive de `tu_correo@empresa.pe`.
 Cambiar de uno a otro se hace **solo con los Secrets de Streamlit**, sin tocar el código.
 
 ## Secrets (nivel superior, sin sección)
@@ -10,7 +10,7 @@ Cambiar de uno a otro se hace **solo con los Secrets de Streamlit**, sin tocar e
 AZURE_TENANT_ID     = "..."
 AZURE_CLIENT_ID     = "..."
 AZURE_CLIENT_SECRET = "..."                  # el VALOR del secreto, no su ID
-ONEDRIVE_USER       = "khidalgo@mariaalmenara.pe"
+ONEDRIVE_USER       = "tu_correo@empresa.pe"
 ONEDRIVE_ROOT       = "Calidad"              # opcional
 
 BACKEND = "google"        # "onedrive" para pasar TODAS las apps a OneDrive

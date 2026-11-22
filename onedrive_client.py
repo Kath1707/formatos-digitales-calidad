@@ -19,7 +19,7 @@ Secrets de Streamlit (nivel superior, sin sección):
     AZURE_TENANT_ID     = "..."
     AZURE_CLIENT_ID     = "..."
     AZURE_CLIENT_SECRET = "..."          # el VALOR del secreto, no su ID
-    ONEDRIVE_USER       = "khidalgo@mariaalmenara.pe"
+    ONEDRIVE_USER       = "tu_correo@empresa.pe"
     ONEDRIVE_ROOT       = "Calidad"      # opcional, por defecto "Calidad"
     BACKEND             = "google"       # "onedrive" para activar este módulo
     BACKEND_PT / BACKEND_PI / BACKEND_COCINA / BACKEND_HUEVO / BACKEND_NARANJA /

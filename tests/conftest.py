@@ -129,7 +129,7 @@ def nube(monkeypatch):
     import onedrive_client as od
 
     g = FakeGraph()
-    monkeypatch.setenv("ONEDRIVE_USER", "khidalgo@mariaalmenara.pe")
+    monkeypatch.setenv("ONEDRIVE_USER", "tu_correo@empresa.pe")
     monkeypatch.setenv("ONEDRIVE_ROOT", "Calidad")
     monkeypatch.setattr(od, "_http", g.http)
     monkeypatch.setattr(od, "time", type("T", (), {"sleep": staticmethod(lambda s: None), "time": staticmethod(__import__("time").time)}))
